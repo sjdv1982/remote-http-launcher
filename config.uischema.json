@@ -1,0 +1,45 @@
+{
+  "ui:order": [
+    "workdir",
+    "hostname",
+    "ssh-hostname",
+    "network-interface",
+    "key",
+    "command",
+    "handshake",
+    "conda"
+  ],
+  "workdir": {
+    "ui:autofocus": true,
+    "ui:placeholder": "/srv/app"
+  },
+  "hostname": {
+    "ui:placeholder": "example.com"
+  },
+  "ssh-hostname": {
+    "ui:placeholder": "ssh.example.com",
+    "ui:help": "If omitted, defaults to the HTTP hostname."
+  },
+  "network-interface": {
+    "ui:placeholder": "0.0.0.0",
+    "ui:help": "Defaults to localhost when left blank."
+  },
+  "key": {
+    "ui:placeholder": "my-app"
+  },
+  "command": {
+    "ui:widget": "textarea",
+    "ui:options": {
+      "rows": 3
+    },
+    "ui:help": "Single-line bash command; rendered in multi-line editor for convenience."
+  },
+  "handshake": {
+    "ui:placeholder": "/status",
+    "ui:help": "Either a path string or an object with path + parameters."
+  },
+  "conda": {
+    "ui:placeholder": "myenv",
+    "ui:help": "Optional conda environment name."
+  }
+}

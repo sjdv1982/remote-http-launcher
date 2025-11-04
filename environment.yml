@@ -1,0 +1,6 @@
+name: remote-http-launcher
+channels:
+  - conda-forge
+dependencies:
+  - pyyaml
+  - jsonschema

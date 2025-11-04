@@ -1,0 +1,81 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://example.com/remote-http-launcher.schema.yaml"
+title: Remote HTTP Launcher Configuration
+description: >
+  Schema describing remote HTTP launcher configuration files as outlined in specifications.txt.
+type: object
+required:
+  - workdir
+  - hostname
+  - key
+  - command
+properties:
+  workdir:
+    type: string
+    pattern: '^[A-Za-z0-9@_./~-]+$'
+    description: Plausible UNIX work directory path.
+  hostname:
+    $ref: "#/$defs/hostnameOrIp"
+    description: Target HTTP hostname or IP.
+  ssh-hostname:
+    $ref: "#/$defs/hostnameOrIp"
+    description: SSH host to connect to; defaults to hostname when omitted.
+  key:
+    type: string
+    pattern: '^[A-Za-z0-9._-]+$'
+    description: >
+      Connection key used for the JSON state file; evaluated from the config and must be a UNIX file name.
+  command:
+    type: string
+    minLength: 1
+    pattern: '^[^\n]+$'
+    description: >
+      Bash command template executed remotely. Must be a single-line string.
+  network-interface:
+    $ref: "#/$defs/hostname"
+    default: localhost
+    description: Network interface name the remote service binds to; defaults to localhost.
+  handshake:
+    oneOf:
+      - type: string
+        description: Optional HTTP path used during the handshake GET request.
+      - type: object
+        required:
+          - path
+          - parameters
+        additionalProperties: false
+        properties:
+          path:
+            type: string
+            description: HTTP path used during the handshake GET request.
+          parameters:
+            type: object
+            description: Query parameters appended to the handshake request.
+            additionalProperties:
+              type: string
+            propertyNames:
+              pattern: '^[A-Za-z0-9._~-]+$'
+  conda:
+    type: string
+    description: Name of the remote conda environment to activate before launching the command.
+additionalProperties: true
+
+$defs:
+  hostnameOrIp:
+    anyOf:
+      - $ref: "#/$defs/hostname"
+      - $ref: "#/$defs/ipv4"
+      - $ref: "#/$defs/ipv6"
+    description: Value that can be a hostname, IPv4 address, or IPv6 address.
+  hostname:
+    type: string
+    pattern: '^(?=.{1,253}$)([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'
+    description: RFC-compliant hostname without a trailing dot.
+  ipv4:
+    type: string
+    pattern: '^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$'
+    description: IPv4 address.
+  ipv6:
+    type: string
+    pattern: '^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$'
+    description: Simplified IPv6 address pattern.
