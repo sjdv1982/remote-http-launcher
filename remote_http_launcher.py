@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -421,9 +422,13 @@ class RemoteState:
             "sys.exit(0 if path.exists() else 1)\n"
         )
         result = self.ssh.run_python(
-            script, check=False, conda=bool(self.cfg.conda_env)
+            script, check=False, conda=bool(self.cfg.conda_env), silent=True
         )
         return result.returncode == 0
+
+    def kill_process(self, pid) -> None:
+        script = f"kill -1 {pid}"
+        self.ssh.run_shell(script, check=False, conda=False, silent=False)
 
     def remove(self) -> None:
         script = (
@@ -436,7 +441,9 @@ class RemoteState:
             "except FileNotFoundError:\n"
             "    pass\n"
         )
-        self.ssh.run_python(script, check=True, conda=bool(self.cfg.conda_env))
+        self.ssh.run_python(
+            script, check=True, conda=bool(self.cfg.conda_env), silent=True
+        )
 
     def read(self) -> Dict[str, Any]:
         script = (
@@ -487,7 +494,7 @@ class RemoteState:
             return None
         return stdout
 
-    def launch_process(self, conda_base: Optional[str]) -> Tuple[int, str]:
+    def launch_process(self, conda_base: Optional[str]) -> None:
         command_template = self.cfg.command_template
         namespace = self.cfg.namespace.copy()
         namespace["status_file"] = self.json_path
@@ -544,17 +551,9 @@ class RemoteState:
             "    data['network-interface'] = network_interface\n"
             "with json_path.open('w', encoding='utf-8') as handle:\n"
             "    json.dump(data, handle)\n"
-            "proc.communicate()\n"
             "stdout_handle.close()\n"
-            "if proc.returncode != 0:\n"
-            "   print(log_file.read_text())\n"
-            "   sys.exit(proc.returncode)\n"
-            "print(json.dumps(data))\n"
         ).replace("{network!r}", repr(self.cfg.network_interface))
-        completed_process = self.ssh.run_python(
-            script, conda=bool(self.cfg.conda_env), check=False
-        )
-        return completed_process.returncode, completed_process.stdout
+        self.ssh.run_python(script, conda=bool(self.cfg.conda_env))
 
     def verify_port_in_use(self, host: str, port: int) -> None:
         script = (
@@ -750,9 +749,24 @@ def handle_remote(cfg: Configuration, remote: RemoteState) -> Dict[str, Any]:
             status = data.get("status")
             if status == "running":
                 validate_remote_running_state(data)
+                pid = data["pid"]
                 target_host = data.get("network-interface", cfg.network_interface)
-                remote.verify_port_in_use(target_host, data["port"])
-                remote.handshake(target_host, data["port"], cfg.handshake)
+                try:
+                    remote.verify_port_in_use(target_host, data["port"])
+                except LauncherError as exc:
+                    traceback.print_exc()
+                    remote.kill_process(pid)
+                    remote.remove()
+                    continue
+
+                try:
+                    remote.handshake(target_host, data["port"], cfg.handshake)
+                except LauncherError as exc:
+                    traceback.print_exc()
+                    remote.kill_process(pid)
+                    remote.remove()
+                    continue
+
                 return data
             if status == "starting" and isinstance(data.get("pid"), int):
                 monitored = monitor_remote_start(cfg, remote, data)
@@ -788,24 +802,12 @@ def handle_remote(cfg: Configuration, remote: RemoteState) -> Dict[str, Any]:
                 raise LauncherError(
                     f"Remote conda environment '{cfg.conda_env}' does not exist."
                 )
-        remote_process_returncode, remote_process_stdout = remote.launch_process(
-            conda_base
-        )
-        if not remote_process_returncode:
-            try:
-                result = json.loads(remote_process_stdout.strip())
-                return result
-            except ValueError:
-                raise LauncherError("Remote launch didn't return JSON.")
-        else:
-            LOGGER.error(
-                """Remote process FAILED.
-                        Log contents:
-                        """
-                + remote_process_stdout
-            )
-            remote.remove()
-            raise LauncherError("Remote process failed.")
+        remote.launch_process(conda_base)
+        attempted_launch = True
+        for _ in range(10):
+            if remote.exists():
+                break
+            time.sleep(2.0)
 
 
 def monitor_remote_start(
