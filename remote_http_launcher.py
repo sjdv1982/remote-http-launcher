@@ -33,6 +33,11 @@ REMOTE_JSON_NAME = "{key}.json"
 REMOTE_LOG_PREFIX = "log-{key}-"
 REMOTE_LOG_SUFFIX = ".log"
 LOCAL_JSON_PERMS = 0o600
+CONDA_PATH_RE = re.compile(r'["\']([^"\']+/etc/profile\.d/conda\.sh)["\']')
+CONDA_INIT_BLOCK_RE = re.compile(
+    r"# >>> conda initialize >>>(.*?)# <<< conda initialize <<<",
+    re.DOTALL,
+)
 
 FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 DIRNAME_RE = re.compile(r"^[A-Za-z0-9@_./~-]+$")
@@ -238,7 +243,7 @@ class SSHExecutor:
             conda_source = self._ensure_conda_setup()
             if conda_source:
                 final_command = (
-                    f"'source {shlex.quote(conda_source)} && {final_command}'"
+                    f"source {shlex.quote(conda_source)} && {final_command}"
                 )
         LOGGER.info(
             "SSHExecutor[%s] run_shell final command: %s", self.host, final_command
@@ -257,7 +262,7 @@ class SSHExecutor:
             command,
         )
         return subprocess.run(
-            ["ssh", self.host, "bash -lc '" + command + "'"],
+            ["ssh", self.host, "bash", "-lc", command],
             text=True,
             capture_output=True,
         )
@@ -305,11 +310,7 @@ class SSHExecutor:
             )
             return None
         text = bashrc.stdout
-        block_match = re.search(
-            r"# >>> conda initialize >>>(.*?)# <<< conda initialize <<<",
-            text,
-            re.DOTALL,
-        )
+        block_match = CONDA_INIT_BLOCK_RE.search(text)
         if not block_match:
             LOGGER.info(
                 "SSHExecutor[%s] no conda initialize block found in ~/.bashrc",
@@ -317,10 +318,7 @@ class SSHExecutor:
             )
             return None
         block = block_match.group(1)
-        path_match = re.search(
-            r"[\"']([^\"']+/etc/profile\\.d/conda\\.sh)[\"']",
-            block,
-        )
+        path_match = CONDA_PATH_RE.search(block)
         if not path_match:
             LOGGER.info(
                 "SSHExecutor[%s] conda initialize block missing conda.sh path",
