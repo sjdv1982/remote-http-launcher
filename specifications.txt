@@ -9,9 +9,11 @@ For each, the value is interpreted as a Python f-string inside a particular name
 - Each of the configuration fields where the field name is a valid Python variable name, is represented as a variable of that name.
 - The configuration dict as a whole, as a variable "config"
 - "key" is evaluated first; after that, the result value is added to the namespace as "key".
+- "command" is evaluated later, on the remote host, during scenario 3. The path to the remote JSON file is included in the namespace as "status_file"
 The f-string is evaluated in a safe manner.
 The evaluated "key" f-expression is from now on called "the key", and similar there is "the command".
 The key must be a plausible UNIX file name. The command must be a plausible bash command.
+
 
 The configuration dict MAY contain a field called "handshake", which must contain either a path string or a dict with two keys: 
 "path" containing a path string and "parameters" containing a dict. 

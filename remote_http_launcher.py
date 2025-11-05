@@ -51,10 +51,11 @@ class Configuration:
     hostname: str
     ssh_hostname: str
     key: str
-    command: str
+    command_template: str
     network_interface: str
     handshake: HandshakeConfig | None
     conda_env: Optional[str]
+    namespace: Dict[str, Any]
     raw: Dict[str, Any]
 
     @staticmethod
@@ -78,11 +79,17 @@ class Configuration:
 
         ssh_hostname = Configuration._get_string(data, "ssh-hostname", hostname)
         if not _is_valid_hostname_or_ip(ssh_hostname):
-            raise LauncherError("ssh-hostname must be a valid SSH hostname or IP address.")
+            raise LauncherError(
+                "ssh-hostname must be a valid SSH hostname or IP address."
+            )
 
-        network_interface = Configuration._get_string(data, "network-interface", "localhost")
+        network_interface = Configuration._get_string(
+            data, "network-interface", "localhost"
+        )
         if not _is_valid_hostname_or_ip(network_interface):
-            raise LauncherError("network-interface must be a valid HTTP hostname or IP address.")
+            raise LauncherError(
+                "network-interface must be a valid HTTP hostname or IP address."
+            )
 
         handshake = Configuration._parse_handshake(data.get("handshake"))
 
@@ -97,17 +104,16 @@ class Configuration:
         evaluated_key = _evaluate_template(key_template, namespace)
         if not isinstance(evaluated_key, str):
             raise LauncherError("The evaluated key must be a string.")
-        if not evaluated_key or "/" in evaluated_key or not FILENAME_RE.fullmatch(evaluated_key):
+        if (
+            not evaluated_key
+            or "/" in evaluated_key
+            or not FILENAME_RE.fullmatch(evaluated_key)
+        ):
             raise LauncherError("The key must be a plausible UNIX file name.")
 
         namespace["key"] = evaluated_key
 
         command_template = Configuration._require_string(data, "command")
-        evaluated_command = _evaluate_template(command_template, namespace)
-        if not isinstance(evaluated_command, str):
-            raise LauncherError("The evaluated command must be a string.")
-        if not evaluated_command.strip() or "\n" in evaluated_command:
-            raise LauncherError("The command must be a plausible bash command.")
 
         conda_env = data.get("conda")
         if conda_env is not None and not isinstance(conda_env, str):
@@ -118,10 +124,11 @@ class Configuration:
             hostname=hostname,
             ssh_hostname=ssh_hostname,
             key=evaluated_key,
-            command=evaluated_command,
+            command_template=command_template,
             network_interface=network_interface,
             handshake=handshake,
             conda_env=conda_env,
+            namespace=namespace,
             raw=data,
         )
 
@@ -141,10 +148,14 @@ class Configuration:
             normalized: Dict[str, str] = {}
             for key, val in parameters_value.items():
                 if not isinstance(key, str) or not isinstance(val, (str, int, float)):
-                    raise LauncherError("handshake parameters must map strings to simple values.")
+                    raise LauncherError(
+                        "handshake parameters must map strings to simple values."
+                    )
                 normalized[key] = str(val)
             return HandshakeConfig(path=path_value, parameters=normalized)
-        raise LauncherError("handshake must be a string path or a mapping with path and parameters.")
+        raise LauncherError(
+            "handshake must be a string path or a mapping with path and parameters."
+        )
 
     @staticmethod
     def _require_string(data: Dict[str, Any], key: str) -> str:
@@ -167,7 +178,9 @@ class LocalState:
     json_path: pathlib.Path
 
     @staticmethod
-    def build(config: Configuration, override_dir: Optional[pathlib.Path]) -> "LocalState":
+    def build(
+        config: Configuration, override_dir: Optional[pathlib.Path]
+    ) -> "LocalState":
         base_dir = override_dir or _default_directory()
         base_dir.mkdir(parents=True, exist_ok=True)
         json_path = base_dir / REMOTE_JSON_NAME.format(key=config.key)
@@ -180,7 +193,9 @@ class LocalState:
             try:
                 return json.load(handle)
             except json.JSONDecodeError as exc:
-                raise LauncherError(f"Malformed local connection file: {self.json_path}") from exc
+                raise LauncherError(
+                    f"Malformed local connection file: {self.json_path}"
+                ) from exc
 
     def write(self, payload: Dict[str, Any]) -> None:
         tmp_path = self.json_path.with_suffix(".tmp")
@@ -200,24 +215,32 @@ class SSHExecutor:
     def __init__(self, host: str):
         self.host = host
 
-    def run_shell(self, command: str, *, check: bool = True) -> subprocess.CompletedProcess:
+    def run_shell(
+        self, command: str, *, check: bool = True
+    ) -> subprocess.CompletedProcess:
         result = subprocess.run(
             ["ssh", self.host, "bash", "-lc", command],
             text=True,
             capture_output=True,
         )
         if check and result.returncode != 0:
-            raise LauncherError(f"SSH command failed: {command}\n{result.stderr.strip()}")
+            raise LauncherError(
+                f"SSH command failed: {command}\n{result.stderr.strip()}"
+            )
         return result
 
-    def run_python(self, script: str, *, check: bool = True) -> subprocess.CompletedProcess:
+    def run_python(
+        self, script: str, *, check: bool = True
+    ) -> subprocess.CompletedProcess:
         result = subprocess.run(
             ["ssh", self.host, "python3", "-c", script],
             text=True,
             capture_output=True,
         )
         if check and result.returncode != 0:
-            raise LauncherError(f"Remote Python command failed: {result.stderr.strip()}")
+            raise LauncherError(
+                f"Remote Python command failed: {result.stderr.strip()}"
+            )
         return result
 
 
@@ -283,13 +306,23 @@ class RemoteState:
         return payload
 
     def launch_process(self, conda_base: Optional[str]) -> Dict[str, Any]:
-        command = self.cfg.command
+        command_template = self.cfg.command_template
+        namespace = self.cfg.namespace.copy()
+        namespace["status_file"] = self.json_path
+        evaluated_command = _evaluate_template(command_template, self.cfg.namespace)
+        if not isinstance(evaluated_command, str):
+            raise LauncherError("The evaluated command must be a string.")
+        if not evaluated_command.strip() or "\n" in evaluated_command:
+            raise LauncherError("The command must be a plausible bash command.")
+
         if self.cfg.conda_env:
             if not conda_base:
-                raise LauncherError("Conda base path is required to activate environment.")
+                raise LauncherError(
+                    "Conda base path is required to activate environment."
+                )
             activation = (
                 f"source {shlex.quote(os.path.join(conda_base, 'etc/profile.d/conda.sh'))} && "
-                f"conda activate {shlex.quote(self.cfg.conda_env)} && {command}"
+                f"conda activate {shlex.quote(self.cfg.conda_env)} && {evaluated_command}"
             )
             command = activation
 
@@ -320,7 +353,7 @@ class RemoteState:
             "data = {\n"
             f"    'workdir': {self.cfg.workdir!r},\n"
             "    'log': log_file.name,\n"
-            f"    'command': {self.cfg.command!r},\n"
+            f"    'command': {evaluated_command!r},\n"
             "    'uid': os.getuid(),\n"
             "    'pid': proc.pid,\n"
             "    'status': 'starting',\n"
@@ -353,7 +386,9 @@ class RemoteState:
         )
         self.ssh.run_python(script)
 
-    def handshake(self, host: str, port: int, handshake: HandshakeConfig | None) -> None:
+    def handshake(
+        self, host: str, port: int, handshake: HandshakeConfig | None
+    ) -> None:
         url = build_handshake_url(host, port, handshake)
         script = (
             "import sys, urllib.error, urllib.request\n"
@@ -415,14 +450,25 @@ def build_handshake_url(host: str, port: int, handshake: HandshakeConfig | None)
             parsed = urllib.parse.urlsplit(path)
             path = parsed.path or ""
             if parsed.query:
-                params.update({k: v for k, v in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)})
+                params.update(
+                    {
+                        k: v
+                        for k, v in urllib.parse.parse_qsl(
+                            parsed.query, keep_blank_values=True
+                        )
+                    }
+                )
         params.update(handshake.parameters)
     norm_path = path if path.startswith("/") or not path else f"/{path}"
     query = urllib.parse.urlencode(params)
-    return urllib.parse.urlunparse(("http", f"{host}:{port}", norm_path or "/", "", query, ""))
+    return urllib.parse.urlunparse(
+        ("http", f"{host}:{port}", norm_path or "/", "", query, "")
+    )
 
 
-def perform_local_handshake(host: str, port: int, handshake: HandshakeConfig | None) -> None:
+def perform_local_handshake(
+    host: str, port: int, handshake: HandshakeConfig | None
+) -> None:
     url = build_handshake_url(host, port, handshake)
     try:
         with urllib.request.urlopen(url, timeout=10) as response:
@@ -434,14 +480,17 @@ def perform_local_handshake(host: str, port: int, handshake: HandshakeConfig | N
 
 
 def validate_remote_running_state(data: Dict[str, Any]) -> None:
-    if not isinstance(data.get("port"), int):
+    port = data.get("port")
+    if not isinstance(port, int):
         raise LauncherError("Remote JSON must provide integer port.")
-    if data.get("port") < 1 or data.get("port") > 65535:
+    if port < 1 or port > 65535:
         raise LauncherError("Remote port is out of range.")
     if not isinstance(data.get("command"), str) or not data["command"]:
         raise LauncherError("Remote JSON must include a plausible command string.")
     if "network-interface" in data and not isinstance(data["network-interface"], str):
-        raise LauncherError("Remote JSON network-interface must be a string when present.")
+        raise LauncherError(
+            "Remote JSON network-interface must be a string when present."
+        )
     if not isinstance(data.get("uid"), int):
         raise LauncherError("Remote JSON must include uid.")
     if not isinstance(data.get("pid"), int):
@@ -455,7 +504,9 @@ def allocate_local_port() -> int:
         return int(port)
 
 
-def establish_tunnel(ssh_host: str, remote_host: str, remote_port: int, local_port: int) -> None:
+def establish_tunnel(
+    ssh_host: str, remote_host: str, remote_port: int, local_port: int
+) -> None:
     cmd = [
         "ssh",
         "-f",
@@ -471,12 +522,12 @@ def establish_tunnel(ssh_host: str, remote_host: str, remote_port: int, local_po
 
 def _fetch_conda_base(ssh: SSHExecutor) -> Optional[str]:
     try:
-        result = ssh.run_shell('command -v conda >/dev/null 2>&1')
+        result = ssh.run_shell("command -v conda >/dev/null 2>&1")
     except LauncherError:
         return None
     if result.returncode != 0:
         return None
-    base_result = ssh.run_shell('conda info --base', check=True)
+    base_result = ssh.run_shell("conda info --base", check=True)
     base_path = base_result.stdout.strip()
     if not base_path:
         raise LauncherError("Unable to discover conda base path.")
@@ -510,7 +561,9 @@ def handle_remote(cfg: Configuration, remote: RemoteState) -> Dict[str, Any]:
                 if monitored is not None:
                     return monitored
                 if attempted_launch:
-                    raise LauncherError("Remote process did not finish starting after relaunch.")
+                    raise LauncherError(
+                        "Remote process did not finish starting after relaunch."
+                    )
                 remote.remove()
                 attempted_launch = True
                 continue
@@ -525,15 +578,21 @@ def handle_remote(cfg: Configuration, remote: RemoteState) -> Dict[str, Any]:
         if cfg.conda_env:
             conda_base = _fetch_conda_base(remote.ssh)
             if not conda_base:
-                raise LauncherError("Conda environment requested but conda is not installed remotely.")
+                raise LauncherError(
+                    "Conda environment requested but conda is not installed remotely."
+                )
             if not _conda_env_exists(remote.ssh, cfg.conda_env):
-                raise LauncherError(f"Remote conda environment '{cfg.conda_env}' does not exist.")
+                raise LauncherError(
+                    f"Remote conda environment '{cfg.conda_env}' does not exist."
+                )
         remote.launch_process(conda_base)
         attempted_launch = True
         time.sleep(2.0)
 
 
-def monitor_remote_start(cfg: Configuration, remote: RemoteState, initial: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def monitor_remote_start(
+    cfg: Configuration, remote: RemoteState, initial: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
     payload = remote.stat_and_read()
     last_mtime = float(payload["mtime"])
     last_change = time.time()
@@ -559,7 +618,9 @@ def monitor_remote_start(cfg: Configuration, remote: RemoteState, initial: Dict[
                 return None
 
 
-def handle_local(cfg: Configuration, local_state: LocalState) -> Optional[Dict[str, Any]]:
+def handle_local(
+    cfg: Configuration, local_state: LocalState
+) -> Optional[Dict[str, Any]]:
     existing = local_state.read()
     if existing is None:
         return None
@@ -599,7 +660,9 @@ def create_local_file(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Remote HTTP launcher.")
-    parser.add_argument("config", type=pathlib.Path, help="Path to the YAML configuration file.")
+    parser.add_argument(
+        "config", type=pathlib.Path, help="Path to the YAML configuration file."
+    )
     parser.add_argument(
         "--connection-dir",
         type=pathlib.Path,
@@ -629,4 +692,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
