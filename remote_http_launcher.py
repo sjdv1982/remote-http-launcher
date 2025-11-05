@@ -242,9 +242,7 @@ class SSHExecutor:
         if conda:
             conda_source = self._ensure_conda_setup()
             if conda_source:
-                final_command = (
-                    f"source {shlex.quote(conda_source)} && {final_command}"
-                )
+                final_command = f"source {shlex.quote(conda_source)} && {final_command}"
         LOGGER.info(
             "SSHExecutor[%s] run_shell final command: %s", self.host, final_command
         )
@@ -256,13 +254,14 @@ class SSHExecutor:
         return result
 
     def _run_bash(self, command: str) -> subprocess.CompletedProcess:
+        remote_command = f"bash -lc {shlex.quote(command)}"
         LOGGER.info(
             "SSHExecutor[%s] executing bash over SSH: %s",
             self.host,
-            command,
+            remote_command,
         )
         return subprocess.run(
-            ["ssh", self.host, "bash", "-lc", command],
+            ["ssh", self.host, remote_command],
             text=True,
             capture_output=True,
         )
@@ -449,7 +448,7 @@ class RemoteState:
         command_template = self.cfg.command_template
         namespace = self.cfg.namespace.copy()
         namespace["status_file"] = self.json_path
-        evaluated_command = _evaluate_template(command_template, self.cfg.namespace)
+        evaluated_command = _evaluate_template(command_template, namespace)
         if not isinstance(evaluated_command, str):
             raise LauncherError("The evaluated command must be a string.")
         if not evaluated_command.strip() or "\n" in evaluated_command:
