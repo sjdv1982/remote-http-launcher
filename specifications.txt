@@ -21,7 +21,7 @@ The configuration dict MAY contain a field called "handshake", which must contai
 The configuration dict MAY contain a field called "network-interface". If not, its value defaults to "localhost". 
 It is validated that this string value is a valid HTTP hostname.
 
-There is a global connection file directory, by default $HOME/.remote-http-launcher/
+There is a global connection file directory, by default $HOME/.remote-http-launcher/client
 The launcher looks in this directory for a local JSON file named X.json, where X=the key. 
 
 There are two possibilities:
@@ -40,7 +40,7 @@ If it doesn't, delete the local JSON file, and then proceed under possibility B
 B. The local JSON file does not exist. 
 In that case, create an SSH connection to "ssh-hostname". 
 
-On the SSH host, there is a global connection file directory, by default $HOME/.remote-http-launcher/
+On the SSH host, there is a global connection file directory, by default $HOME/.remote-http-launcher/server
 The launcher looks in this directory for a remote JSON file named X.json, where X=the key. 
 
 

@@ -19,7 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 try:
     import yaml  # type: ignore
@@ -29,9 +29,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - import guard
 
 CONFIG_DIR_ENV = "REMOTE_HTTP_LAUNCHER_DIR"
 DEFAULT_DIRNAME = ".remote-http-launcher"
-REMOTE_JSON_NAME = "{key}.json"
-REMOTE_LOG_PREFIX = "log-{key}-"
-REMOTE_LOG_SUFFIX = ".log"
+JSON_NAME = "{key}.json"
+REMOTE_LOG_NAME = "{key}.log"
 LOCAL_JSON_PERMS = 0o600
 CONDA_PATH_RE = re.compile(r'["\']([^"\']+/etc/profile\.d/conda\.sh)["\']')
 CONDA_INIT_BLOCK_RE = re.compile(
@@ -192,9 +191,9 @@ class LocalState:
     def build(
         config: Configuration, override_dir: Optional[pathlib.Path]
     ) -> "LocalState":
-        base_dir = override_dir or _default_directory()
+        base_dir = override_dir or _default_client_directory()
         base_dir.mkdir(parents=True, exist_ok=True)
-        json_path = base_dir / REMOTE_JSON_NAME.format(key=config.key)
+        json_path = base_dir / JSON_NAME.format(key=config.key)
         return LocalState(connection_dir=base_dir, json_path=json_path)
 
     def read(self) -> Optional[Dict[str, Any]]:
@@ -230,41 +229,51 @@ class SSHExecutor:
         self._conda_unavailable = False
 
     def run_shell(
-        self, command: str, *, check: bool = True, conda: bool = False
+        self, command: str, *, check: bool = True, conda: bool = False, silent=False
     ) -> subprocess.CompletedProcess:
-        LOGGER.info(
-            "SSHExecutor[%s] run_shell requested command (conda=%s): %s",
-            self.host,
-            conda,
-            command,
-        )
+        if not silent:
+            LOGGER.info(
+                "SSHExecutor[%s] run_shell requested command (conda=%s): %s",
+                self.host,
+                conda,
+                command,
+            )
         final_command = command
         if conda:
             conda_source = self._ensure_conda_setup()
             if conda_source:
                 final_command = f"source {shlex.quote(conda_source)} && {final_command}"
-        LOGGER.info(
-            "SSHExecutor[%s] run_shell final command: %s", self.host, final_command
-        )
-        result = self._run_bash(final_command)
+        if not silent:
+            LOGGER.info(
+                "SSHExecutor[%s] run_shell final command: %s", self.host, final_command
+            )
+        result = self._run_bash(final_command, silent=silent)
         if check and result.returncode != 0:
             raise LauncherError(
                 f"SSH command failed: {final_command}\n{result.stderr.strip()}"
             )
         return result
 
-    def _run_bash(self, command: str) -> subprocess.CompletedProcess:
+    def _run_bash(self, command: str, *, silent=False) -> subprocess.CompletedProcess:
         remote_command = f"bash -lc {shlex.quote(command)}"
-        LOGGER.info(
-            "SSHExecutor[%s] executing bash over SSH: %s",
-            self.host,
-            remote_command,
-        )
-        return subprocess.run(
+        if not silent:
+            LOGGER.info(
+                "SSHExecutor[%s] executing bash over SSH: %s",
+                self.host,
+                remote_command,
+            )
+        result = subprocess.run(
             ["ssh", self.host, remote_command],
             text=True,
             capture_output=True,
         )
+        if not silent:
+            LOGGER.info(
+                "SSHExecutor[%s] FINISHED executing bash over SSH: %s",
+                self.host,
+                remote_command,
+            )
+        return result
 
     def _ensure_conda_setup(self) -> Optional[str]:
         if self._conda_unavailable:
@@ -327,29 +336,31 @@ class SSHExecutor:
         return path_match.group(1)
 
     def run_python(
-        self, script: str, *, check: bool = True, conda: bool = False
+        self, script: str, *, check: bool = True, conda: bool = False, silent=False
     ) -> subprocess.CompletedProcess:
         remote_path = f"/tmp/rhl-{uuid.uuid4().hex}.py"
-        LOGGER.info(
-            "SSHExecutor[%s] preparing remote Python script %s",
-            self.host,
-            remote_path,
-        )
-        LOGGER.info(
-            "SSHExecutor[%s] Python script contents:\n%s",
-            self.host,
-            script,
-        )
+        if not silent:
+            LOGGER.info(
+                "SSHExecutor[%s] preparing remote Python script %s",
+                self.host,
+                remote_path,
+            )
+            LOGGER.info(
+                "SSHExecutor[%s] Python script contents:\n%s",
+                self.host,
+                script,
+            )
         with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as handle:
             handle.write(script)
             local_path = handle.name
         try:
             scp_target = f"{self.host}:{remote_path}"
-            LOGGER.info(
-                "SSHExecutor[%s] uploading temp script via scp to %s",
-                self.host,
-                scp_target,
-            )
+            if not silent:
+                LOGGER.info(
+                    "SSHExecutor[%s] uploading temp script via scp to %s",
+                    self.host,
+                    scp_target,
+                )
             scp = subprocess.run(
                 ["scp", local_path, scp_target], text=True, capture_output=True
             )
@@ -359,22 +370,29 @@ class SSHExecutor:
                 )
             try:
                 result = self.run_shell(
-                    f"python3 {shlex.quote(remote_path)}", check=check, conda=conda
+                    f"python3 {shlex.quote(remote_path)}",
+                    check=check,
+                    conda=conda,
+                    silent=silent,
                 )
             finally:
-                LOGGER.info(
-                    "SSHExecutor[%s] removing remote temp script %s",
-                    self.host,
-                    remote_path,
+                if not silent:
+                    LOGGER.info(
+                        "SSHExecutor[%s] removing remote temp script %s",
+                        self.host,
+                        remote_path,
+                    )
+                self.run_shell(
+                    f"rm -f {shlex.quote(remote_path)}", check=False, silent=silent
                 )
-                self.run_shell(f"rm -f {shlex.quote(remote_path)}", check=False)
         finally:
             try:
-                LOGGER.info(
-                    "SSHExecutor[%s] removing local temp script %s",
-                    self.host,
-                    local_path,
-                )
+                if not silent:
+                    LOGGER.info(
+                        "SSHExecutor[%s] removing local temp script %s",
+                        self.host,
+                        local_path,
+                    )
                 os.remove(local_path)
             except OSError:
                 pass
@@ -389,7 +407,11 @@ class RemoteState:
 
     @property
     def json_path(self) -> str:
-        return os.path.join(self.remote_dir, REMOTE_JSON_NAME.format(key=self.cfg.key))
+        return os.path.join(self.remote_dir, JSON_NAME.format(key=self.cfg.key))
+
+    @property
+    def log_path(self) -> str:
+        return os.path.join(self.remote_dir, REMOTE_LOG_NAME.format(key=self.cfg.key))
 
     def exists(self) -> bool:
         script = (
@@ -440,11 +462,32 @@ class RemoteState:
             "    data = json.load(handle)\n"
             "json.dump({'mtime': stat.st_mtime, 'data': data}, sys.stdout)\n"
         )
-        result = self.ssh.run_python(script, conda=bool(self.cfg.conda_env))
+        result = self.ssh.run_python(
+            script, conda=bool(self.cfg.conda_env), silent=True
+        )
         payload = json.loads(result.stdout)
         return payload
 
-    def launch_process(self, conda_base: Optional[str]) -> Dict[str, Any]:
+    def read_log(self) -> Optional[str]:
+        script = (
+            "import json, pathlib, sys, time\n"
+            f"path = pathlib.Path({self.json_path!r}).expanduser()\n"
+            "stat = path.stat()\n"
+            "with path.open('r', encoding='utf-8') as handle:\n"
+            "    data = json.load(handle)\n"
+            "logfile = data.get('log')\n"
+            "if logfile is not None:\n"
+            "   print(pathlib.Path(logfile).read_text())\n"
+        )
+        result = self.ssh.run_python(
+            script, conda=bool(self.cfg.conda_env), silent=True
+        )
+        stdout = result.stdout.strip()
+        if not stdout:
+            return None
+        return stdout
+
+    def launch_process(self, conda_base: Optional[str]) -> Tuple[int, str]:
         command_template = self.cfg.command_template
         namespace = self.cfg.namespace.copy()
         namespace["status_file"] = self.json_path
@@ -452,7 +495,7 @@ class RemoteState:
         if not isinstance(evaluated_command, str):
             raise LauncherError("The evaluated command must be a string.")
         if not evaluated_command.strip() or "\n" in evaluated_command:
-            raise LauncherError("The command must be a plausible bash command.")
+            raise LauncherError("The command must be a plausiblse bash command.")
 
         command = evaluated_command
         if self.cfg.conda_env:
@@ -471,14 +514,12 @@ class RemoteState:
             f"remote_dir = pathlib.Path({self.remote_dir!r}).expanduser()\n"
             "remote_dir.mkdir(parents=True, exist_ok=True)\n"
             f"json_path = pathlib.Path({self.json_path!r}).expanduser()\n"
-            "log_file = tempfile.NamedTemporaryFile(\n"
-            f"    dir=remote_dir,\n"
-            f"    prefix={REMOTE_LOG_PREFIX.format(key=self.cfg.key)!r},\n"
-            f"    suffix={REMOTE_LOG_SUFFIX!r},\n"
-            "    delete=False,\n"
-            ")\n"
-            "log_file.close()\n"
-            "stdout_handle = open(log_file.name, 'ab', buffering=0)\n"
+            f"log_file = pathlib.Path({self.log_path!r}).expanduser()\n"
+            "try:\n"
+            "    log_file.unlink()\n"
+            "except FileNotFoundError:\n"
+            "    pass\n"
+            "stdout_handle = open(log_file.as_posix(), 'ab', buffering=0)\n"
             f"command = {command!r}\n"
             f"workdir = {self.cfg.workdir!r}\n"
             "proc = subprocess.Popen(\n"
@@ -492,7 +533,7 @@ class RemoteState:
             ")\n"
             "data = {\n"
             f"    'workdir': {self.cfg.workdir!r},\n"
-            "    'log': log_file.name,\n"
+            "    'log': log_file.as_posix(),\n"
             f"    'command': {evaluated_command!r},\n"
             "    'uid': os.getuid(),\n"
             "    'pid': proc.pid,\n"
@@ -503,11 +544,17 @@ class RemoteState:
             "    data['network-interface'] = network_interface\n"
             "with json_path.open('w', encoding='utf-8') as handle:\n"
             "    json.dump(data, handle)\n"
+            "proc.communicate()\n"
             "stdout_handle.close()\n"
+            "if proc.returncode != 0:\n"
+            "   print(log_file.read_text())\n"
+            "   sys.exit(proc.returncode)\n"
             "print(json.dumps(data))\n"
         ).replace("{network!r}", repr(self.cfg.network_interface))
-        result = self.ssh.run_python(script, conda=bool(self.cfg.conda_env))
-        return json.loads(result.stdout.strip())
+        completed_process = self.ssh.run_python(
+            script, conda=bool(self.cfg.conda_env), check=False
+        )
+        return completed_process.returncode, completed_process.stdout
 
     def verify_port_in_use(self, host: str, port: int) -> None:
         script = (
@@ -545,15 +592,22 @@ class RemoteState:
         self.ssh.run_python(script, conda=bool(self.cfg.conda_env))
 
     def process_exists(self, pid: int) -> bool:
-        result = self.ssh.run_shell(f"ps -p {pid} -o pid=", check=False)
+        result = self.ssh.run_shell(f"ps -p {pid} -o pid=", check=False, silent=True)
         return result.returncode == 0 and result.stdout.strip() != ""
 
 
-def _default_directory() -> pathlib.Path:
+def _default_client_directory() -> pathlib.Path:
     base = os.environ.get(CONFIG_DIR_ENV)
     if base:
         return pathlib.Path(base).expanduser()
-    return pathlib.Path.home() / DEFAULT_DIRNAME
+    return pathlib.Path.home() / DEFAULT_DIRNAME / "client"
+
+
+def _default_server_directory() -> pathlib.Path:
+    base = os.environ.get(CONFIG_DIR_ENV)
+    if base:
+        return pathlib.Path(base).expanduser()
+    return pathlib.Path.home() / DEFAULT_DIRNAME / "server"
 
 
 def _evaluate_template(template: str, namespace: Dict[str, Any]) -> Any:
@@ -708,11 +762,16 @@ def handle_remote(cfg: Configuration, remote: RemoteState) -> Dict[str, Any]:
                     raise LauncherError(
                         "Remote process did not finish starting after relaunch."
                     )
+                log = remote.read_log()
+                if log is not None:
+                    LOGGER.error(
+                        """Remote process FAILED.
+                                Log contents:
+                                """
+                        + log
+                    )
                 remote.remove()
-                attempted_launch = True
                 continue
-            if attempted_launch:
-                raise LauncherError("Remote connection file verification failed twice.")
             remote.remove()
             attempted_launch = True
             continue
@@ -729,9 +788,24 @@ def handle_remote(cfg: Configuration, remote: RemoteState) -> Dict[str, Any]:
                 raise LauncherError(
                     f"Remote conda environment '{cfg.conda_env}' does not exist."
                 )
-        remote.launch_process(conda_base)
-        attempted_launch = True
-        time.sleep(2.0)
+        remote_process_returncode, remote_process_stdout = remote.launch_process(
+            conda_base
+        )
+        if not remote_process_returncode:
+            try:
+                result = json.loads(remote_process_stdout.strip())
+                return result
+            except ValueError:
+                raise LauncherError("Remote launch didn't return JSON.")
+        else:
+            LOGGER.error(
+                """Remote process FAILED.
+                        Log contents:
+                        """
+                + remote_process_stdout
+            )
+            remote.remove()
+            raise LauncherError("Remote process failed.")
 
 
 def monitor_remote_start(
@@ -757,7 +831,9 @@ def monitor_remote_start(
             last_mtime = mtime
             last_change = time.time()
             continue
-        if time.time() - last_change > 60:
+        t = time.time()
+        max_elapse = max(t - last_change, t - last_mtime)
+        if max_elapse > 60:
             if not remote.process_exists(pid):
                 return None
 
@@ -815,7 +891,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--connection-dir",
         type=pathlib.Path,
-        help="Override the connection directory. Defaults to ~/.remote-http-launcher/",
+        help="Override the connection directory. Defaults to ~/.remote-http-launcher/client",
     )
     parser.add_argument(
         "--tunnel",
@@ -827,12 +903,15 @@ def main(argv: list[str] | None = None) -> int:
     cfg = Configuration.from_yaml(args.config)
     local_state = LocalState.build(cfg, args.connection_dir)
 
-    local_result = handle_local(cfg, local_state)
-    if local_result:
-        return 0
+    try:
+        local_result = handle_local(cfg, local_state)
+        if local_result:
+            return 0
+    except LauncherError:
+        pass
 
-    remote_dir = os.path.join("~", DEFAULT_DIRNAME)
-    remote = RemoteState(SSHExecutor(cfg.ssh_hostname), cfg, remote_dir)
+    remote_dir = _default_server_directory()
+    remote = RemoteState(SSHExecutor(cfg.ssh_hostname), cfg, remote_dir.as_posix())
     remote_result = handle_remote(cfg, remote)
 
     create_local_file(cfg, local_state, remote_result, args.tunnel)
