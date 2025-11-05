@@ -605,8 +605,8 @@ def _default_client_directory() -> pathlib.Path:
 def _default_server_directory() -> pathlib.Path:
     base = os.environ.get(CONFIG_DIR_ENV)
     if base:
-        return pathlib.Path(base).expanduser()
-    return pathlib.Path.home() / DEFAULT_DIRNAME / "server"
+        return pathlib.Path(base)
+    return pathlib.Path(f"~/{DEFAULT_DIRNAME}/server")
 
 
 def _evaluate_template(template: str, namespace: Dict[str, Any]) -> Any:
