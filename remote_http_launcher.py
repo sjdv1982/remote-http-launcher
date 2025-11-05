@@ -5,6 +5,7 @@ import argparse
 import dataclasses
 import ipaddress
 import json
+import logging
 import os
 import pathlib
 import re
@@ -12,10 +13,12 @@ import shlex
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Any, Dict, Optional
 
 try:
@@ -37,6 +40,9 @@ DIRNAME_RE = re.compile(r"^[A-Za-z0-9@_./~-]+$")
 
 class LauncherError(RuntimeError):
     pass
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass
@@ -214,33 +220,167 @@ class LocalState:
 class SSHExecutor:
     def __init__(self, host: str):
         self.host = host
+        self._conda_checked = False
+        self._conda_source: Optional[str] = None
+        self._conda_unavailable = False
 
     def run_shell(
-        self, command: str, *, check: bool = True
+        self, command: str, *, check: bool = True, conda: bool = False
     ) -> subprocess.CompletedProcess:
-        result = subprocess.run(
-            ["ssh", self.host, "bash", "-lc", command],
-            text=True,
-            capture_output=True,
+        LOGGER.info(
+            "SSHExecutor[%s] run_shell requested command (conda=%s): %s",
+            self.host,
+            conda,
+            command,
         )
+        final_command = command
+        if conda:
+            conda_source = self._ensure_conda_setup()
+            if conda_source:
+                final_command = (
+                    f"'source {shlex.quote(conda_source)} && {final_command}'"
+                )
+        LOGGER.info(
+            "SSHExecutor[%s] run_shell final command: %s", self.host, final_command
+        )
+        result = self._run_bash(final_command)
         if check and result.returncode != 0:
             raise LauncherError(
-                f"SSH command failed: {command}\n{result.stderr.strip()}"
+                f"SSH command failed: {final_command}\n{result.stderr.strip()}"
             )
         return result
 
-    def run_python(
-        self, script: str, *, check: bool = True
-    ) -> subprocess.CompletedProcess:
-        result = subprocess.run(
-            ["ssh", self.host, "python3", "-c", script],
+    def _run_bash(self, command: str) -> subprocess.CompletedProcess:
+        LOGGER.info(
+            "SSHExecutor[%s] executing bash over SSH: %s",
+            self.host,
+            command,
+        )
+        return subprocess.run(
+            ["ssh", self.host, "bash -lc '" + command + "'"],
             text=True,
             capture_output=True,
         )
-        if check and result.returncode != 0:
+
+    def _ensure_conda_setup(self) -> Optional[str]:
+        if self._conda_unavailable:
             raise LauncherError(
-                f"Remote Python command failed: {result.stderr.strip()}"
+                "Conda is not installed on the remote host or could not be initialized."
             )
+        if self._conda_checked:
+            return self._conda_source
+        self._conda_checked = True
+        LOGGER.info("SSHExecutor[%s] probing for conda on PATH", self.host)
+        probe = self._run_bash("command -v conda >/dev/null 2>&1")
+        if probe.returncode == 0:
+            LOGGER.info("SSHExecutor[%s] found conda on PATH", self.host)
+            self._conda_source = None
+            return None
+        conda_source = self._discover_conda_from_bashrc()
+        if not conda_source:
+            self._conda_unavailable = True
+            raise LauncherError(
+                "Conda is not available on the remote host and ~/.bashrc does not "
+                "contain a conda initialize block."
+            )
+        LOGGER.info(
+            "SSHExecutor[%s] discovered conda.sh via ~/.bashrc at %s",
+            self.host,
+            conda_source,
+        )
+        self._conda_source = conda_source
+        return self._conda_source
+
+    def _discover_conda_from_bashrc(self) -> Optional[str]:
+        LOGGER.info(
+            "SSHExecutor[%s] scraping ~/.bashrc for conda initialize block",
+            self.host,
+        )
+        bashrc = self._run_bash("cat ~/.bashrc")
+        if bashrc.returncode != 0:
+            LOGGER.info(
+                "SSHExecutor[%s] unable to read ~/.bashrc (exit %s)",
+                self.host,
+                bashrc.returncode,
+            )
+            return None
+        text = bashrc.stdout
+        block_match = re.search(
+            r"# >>> conda initialize >>>(.*?)# <<< conda initialize <<<",
+            text,
+            re.DOTALL,
+        )
+        if not block_match:
+            LOGGER.info(
+                "SSHExecutor[%s] no conda initialize block found in ~/.bashrc",
+                self.host,
+            )
+            return None
+        block = block_match.group(1)
+        path_match = re.search(
+            r"[\"']([^\"']+/etc/profile\\.d/conda\\.sh)[\"']",
+            block,
+        )
+        if not path_match:
+            LOGGER.info(
+                "SSHExecutor[%s] conda initialize block missing conda.sh path",
+                self.host,
+            )
+            return None
+        return path_match.group(1)
+
+    def run_python(
+        self, script: str, *, check: bool = True, conda: bool = False
+    ) -> subprocess.CompletedProcess:
+        remote_path = f"/tmp/rhl-{uuid.uuid4().hex}.py"
+        LOGGER.info(
+            "SSHExecutor[%s] preparing remote Python script %s",
+            self.host,
+            remote_path,
+        )
+        LOGGER.info(
+            "SSHExecutor[%s] Python script contents:\n%s",
+            self.host,
+            script,
+        )
+        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as handle:
+            handle.write(script)
+            local_path = handle.name
+        try:
+            scp_target = f"{self.host}:{remote_path}"
+            LOGGER.info(
+                "SSHExecutor[%s] uploading temp script via scp to %s",
+                self.host,
+                scp_target,
+            )
+            scp = subprocess.run(
+                ["scp", local_path, scp_target], text=True, capture_output=True
+            )
+            if scp.returncode != 0:
+                raise LauncherError(
+                    f"SCP upload failed: {scp.stderr.strip() or scp.stdout.strip()}"
+                )
+            try:
+                result = self.run_shell(
+                    f"python3 {shlex.quote(remote_path)}", check=check, conda=conda
+                )
+            finally:
+                LOGGER.info(
+                    "SSHExecutor[%s] removing remote temp script %s",
+                    self.host,
+                    remote_path,
+                )
+                self.run_shell(f"rm -f {shlex.quote(remote_path)}", check=False)
+        finally:
+            try:
+                LOGGER.info(
+                    "SSHExecutor[%s] removing local temp script %s",
+                    self.host,
+                    local_path,
+                )
+                os.remove(local_path)
+            except OSError:
+                pass
         return result
 
 
@@ -261,7 +401,9 @@ class RemoteState:
             "import sys\n"
             "sys.exit(0 if path.exists() else 1)\n"
         )
-        result = self.ssh.run_python(script, check=False)
+        result = self.ssh.run_python(
+            script, check=False, conda=bool(self.cfg.conda_env)
+        )
         return result.returncode == 0
 
     def remove(self) -> None:
@@ -275,7 +417,7 @@ class RemoteState:
             "except FileNotFoundError:\n"
             "    pass\n"
         )
-        self.ssh.run_python(script, check=True)
+        self.ssh.run_python(script, check=True, conda=bool(self.cfg.conda_env))
 
     def read(self) -> Dict[str, Any]:
         script = (
@@ -286,7 +428,7 @@ class RemoteState:
             "import json\n"
             "json.dump(data, sys.stdout)\n"
         )
-        result = self.ssh.run_python(script)
+        result = self.ssh.run_python(script, conda=bool(self.cfg.conda_env))
         try:
             return json.loads(result.stdout)
         except json.JSONDecodeError as exc:
@@ -301,7 +443,7 @@ class RemoteState:
             "    data = json.load(handle)\n"
             "json.dump({'mtime': stat.st_mtime, 'data': data}, sys.stdout)\n"
         )
-        result = self.ssh.run_python(script)
+        result = self.ssh.run_python(script, conda=bool(self.cfg.conda_env))
         payload = json.loads(result.stdout)
         return payload
 
@@ -315,6 +457,7 @@ class RemoteState:
         if not evaluated_command.strip() or "\n" in evaluated_command:
             raise LauncherError("The command must be a plausible bash command.")
 
+        command = evaluated_command
         if self.cfg.conda_env:
             if not conda_base:
                 raise LauncherError(
@@ -366,7 +509,7 @@ class RemoteState:
             "stdout_handle.close()\n"
             "print(json.dumps(data))\n"
         ).replace("{network!r}", repr(self.cfg.network_interface))
-        result = self.ssh.run_python(script)
+        result = self.ssh.run_python(script, conda=bool(self.cfg.conda_env))
         return json.loads(result.stdout.strip())
 
     def verify_port_in_use(self, host: str, port: int) -> None:
@@ -384,7 +527,7 @@ class RemoteState:
             "finally:\n"
             "    sock.close()\n"
         )
-        self.ssh.run_python(script)
+        self.ssh.run_python(script, conda=bool(self.cfg.conda_env))
 
     def handshake(
         self, host: str, port: int, handshake: HandshakeConfig | None
@@ -402,7 +545,7 @@ class RemoteState:
             "    print(str(exc), file=sys.stderr)\n"
             "    sys.exit(1)\n"
         )
-        self.ssh.run_python(script)
+        self.ssh.run_python(script, conda=bool(self.cfg.conda_env))
 
     def process_exists(self, pid: int) -> bool:
         result = self.ssh.run_shell(f"ps -p {pid} -o pid=", check=False)
@@ -422,7 +565,9 @@ def _evaluate_template(template: str, namespace: Dict[str, Any]) -> Any:
         code = compile(expression, "<config>", "eval")
         return eval(code, {"__builtins__": {}}, namespace)
     except Exception as exc:
-        raise LauncherError(f"Failed to evaluate template {expression}: {exc}") from None
+        raise LauncherError(
+            f"Failed to evaluate template {expression}: {exc}"
+        ) from None
 
 
 def _is_valid_hostname_or_ip(host: str) -> bool:
@@ -525,12 +670,11 @@ def establish_tunnel(
 
 def _fetch_conda_base(ssh: SSHExecutor) -> Optional[str]:
     try:
-        result = ssh.run_shell("command -v conda >/dev/null 2>&1")
+        base_result = ssh.run_shell("conda info --base", check=False, conda=True)
     except LauncherError:
         return None
-    if result.returncode != 0:
+    if base_result.returncode != 0:
         return None
-    base_result = ssh.run_shell("conda info --base", check=True)
     base_path = base_result.stdout.strip()
     if not base_path:
         raise LauncherError("Unable to discover conda base path.")
@@ -538,7 +682,7 @@ def _fetch_conda_base(ssh: SSHExecutor) -> Optional[str]:
 
 
 def _conda_env_exists(ssh: SSHExecutor, env: str) -> bool:
-    result = ssh.run_shell("conda env list --json", check=True)
+    result = ssh.run_shell("conda env list --json", check=True, conda=True)
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
@@ -662,6 +806,11 @@ def create_local_file(
 
 
 def main(argv: list[str] | None = None) -> int:
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
     parser = argparse.ArgumentParser(description="Remote HTTP launcher.")
     parser.add_argument(
         "config", type=pathlib.Path, help="Path to the YAML configuration file."
