@@ -418,8 +418,11 @@ def _default_directory() -> pathlib.Path:
 
 def _evaluate_template(template: str, namespace: Dict[str, Any]) -> Any:
     expression = f"f{template!r}"
-    code = compile(expression, "<config>", "eval")
-    return eval(code, {"__builtins__": {}}, namespace)
+    try:
+        code = compile(expression, "<config>", "eval")
+        return eval(code, {"__builtins__": {}}, namespace)
+    except Exception as exc:
+        raise LauncherError(f"Failed to evaluate template {expression}: {exc}") from None
 
 
 def _is_valid_hostname_or_ip(host: str) -> bool:
