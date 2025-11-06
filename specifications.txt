@@ -18,7 +18,7 @@ The key must be a plausible UNIX file name. The command must be a plausible bash
 The configuration dict MAY contain a field called "handshake", which must contain either a path string or a dict with two keys: 
 "path" containing a path string and "parameters" containing a dict. 
 
-The configuration dict MAY contain a field called "network-interface". If not, its value defaults to "localhost". 
+The configuration dict MAY contain a field called "network_interface". If not, its value defaults to "localhost". 
 It is validated that this string value is a valid HTTP hostname.
 
 There is a global connection file directory, by default $HOME/.remote-http-launcher/client
@@ -48,7 +48,7 @@ There are four scenarios:
 
 Scenario 1. The remote JSON file exists, and contains a field "status" with value "running". 
 In that case, it is opened, and a field "port" is extracted, which must be an integer.
-It is also verified that the JSON file has plausible values for "command", "network-interface", "uid" and "pid" (process ID).
+It is also verified that the JSON file has plausible values for "command", "network_interface", "uid" and "pid" (process ID).
 It is verified that the port is in use. A handshake message is then sent. 
 This is a GET request to X, where X is the network interface + the path string 
 (the path string is empty if no handshake configuration field was defined). 
@@ -71,7 +71,7 @@ It will contain the following fields:
 - The workdir
 - The temporary log file
 - The command
-- "network-interface" (if it exists)
+- "network_interface" (if it exists)
 - "uid": the current user ID  
 - "pid": the process ID of the subprocess
 - "status" with a value of "starting"

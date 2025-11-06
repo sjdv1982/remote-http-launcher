@@ -35,7 +35,7 @@
       "pattern": "^[^\\n]+$",
       "description": "Bash command template executed remotely. Must be a single-line string."
     },
-    "network-interface": {
+    "network_interface": {
       "$ref": "#/$defs/hostname",
       "default": "localhost",
       "description": "Network interface name the remote service binds to; defaults to localhost."

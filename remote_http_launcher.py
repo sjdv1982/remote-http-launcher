@@ -95,11 +95,11 @@ class Configuration:
             )
 
         network_interface = Configuration._get_string(
-            data, "network-interface", "localhost"
+            data, "network_interface", "localhost"
         )
         if not _is_valid_hostname_or_ip(network_interface):
             raise LauncherError(
-                "network-interface must be a valid HTTP hostname or IP address."
+                "network_interface must be a valid HTTP hostname or IP address."
             )
 
         handshake = Configuration._parse_handshake(data.get("handshake"))
@@ -548,7 +548,7 @@ class RemoteState:
             "}\n"
             "network_interface = {network!r}\n"
             "if network_interface is not None:\n"
-            "    data['network-interface'] = network_interface\n"
+            "    data['network_interface'] = network_interface\n"
             "with json_path.open('w', encoding='utf-8') as handle:\n"
             "    json.dump(data, handle)\n"
             "stdout_handle.close()\n"
@@ -685,9 +685,9 @@ def validate_remote_running_state(data: Dict[str, Any]) -> None:
         raise LauncherError("Remote port is out of range.")
     if not isinstance(data.get("command"), str) or not data["command"]:
         raise LauncherError("Remote JSON must include a plausible command string.")
-    if "network-interface" in data and not isinstance(data["network-interface"], str):
+    if "network_interface" in data and not isinstance(data["network_interface"], str):
         raise LauncherError(
-            "Remote JSON network-interface must be a string when present."
+            "Remote JSON network_interface must be a string when present."
         )
     if not isinstance(data.get("uid"), int):
         raise LauncherError("Remote JSON must include uid.")
@@ -750,7 +750,7 @@ def handle_remote(cfg: Configuration, remote: RemoteState) -> Dict[str, Any]:
             if status == "running":
                 validate_remote_running_state(data)
                 pid = data["pid"]
-                target_host = data.get("network-interface", cfg.network_interface)
+                target_host = data.get("network_interface", cfg.network_interface)
                 try:
                     remote.verify_port_in_use(target_host, data["port"])
                 except LauncherError as exc:
@@ -824,7 +824,7 @@ def monitor_remote_start(
         status = data.get("status")
         if status == "running":
             validate_remote_running_state(data)
-            target_host = data.get("network-interface", cfg.network_interface)
+            target_host = data.get("network_interface", cfg.network_interface)
             remote.verify_port_in_use(target_host, data["port"])
             remote.handshake(target_host, data["port"], cfg.handshake)
             return data

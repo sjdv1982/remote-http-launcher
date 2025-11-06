@@ -12,7 +12,7 @@ required:
 properties:
   workdir:
     type: string
-    pattern: '^[A-Za-z0-9@_./~-]+$'
+    pattern: "^[A-Za-z0-9@_./~-]+$"
     description: Plausible UNIX work directory path.
   hostname:
     $ref: "#/$defs/hostnameOrIp"
@@ -22,7 +22,7 @@ properties:
     description: SSH host to connect to; defaults to hostname when omitted.
   key:
     type: string
-    pattern: '^[A-Za-z0-9._-]+$'
+    pattern: "^[A-Za-z0-9._-]+$"
     description: >
       Connection key used for the JSON state file; evaluated from the config and must be a UNIX file name.
   command:
@@ -31,7 +31,7 @@ properties:
     pattern: '^[^\n]+$'
     description: >
       Bash command template executed remotely. Must be a single-line string.
-  network-interface:
+  network_interface:
     $ref: "#/$defs/hostname"
     default: localhost
     description: Network interface name the remote service binds to; defaults to localhost.
@@ -54,7 +54,7 @@ properties:
             additionalProperties:
               type: string
             propertyNames:
-              pattern: '^[A-Za-z0-9._~-]+$'
+              pattern: "^[A-Za-z0-9._~-]+$"
   conda:
     type: string
     description: Name of the remote conda environment to activate before launching the command.
@@ -77,5 +77,5 @@ $defs:
     description: IPv4 address.
   ipv6:
     type: string
-    pattern: '^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$'
+    pattern: "^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$"
     description: Simplified IPv6 address pattern.

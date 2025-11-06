@@ -3,7 +3,7 @@
     "workdir",
     "hostname",
     "ssh-hostname",
-    "network-interface",
+    "network_interface",
     "key",
     "command",
     "handshake",
@@ -20,7 +20,7 @@
     "ui:placeholder": "ssh.example.com",
     "ui:help": "If omitted, defaults to the HTTP hostname."
   },
-  "network-interface": {
+  "network_interface": {
     "ui:placeholder": "0.0.0.0",
     "ui:help": "Defaults to localhost when left blank."
   },
