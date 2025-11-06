@@ -528,7 +528,7 @@ class RemoteState:
             "    pass\n"
             "stdout_handle = open(log_file.as_posix(), 'ab', buffering=0)\n"
             f"command = {command!r}\n"
-            f"workdir = {self.cfg.workdir!r}\n"
+            f"workdir = pathlib.Path({self.cfg.workdir!r}).expanduser()\n"
             "proc = subprocess.Popen(\n"
             "    command,\n"
             "    shell=True,\n"
@@ -705,6 +705,7 @@ def allocate_local_port() -> int:
 def establish_tunnel(
     ssh_host: str, remote_host: str, remote_port: int, local_port: int
 ) -> None:
+    raise NotImplementedError("Need tunnel PID!")  ###
     cmd = [
         "ssh",
         "-f",
