@@ -1,8 +1,8 @@
 The remote HTTP launcher reads a YAML configuration file. Loading that configuration file must result in a configuration dict. 
 
 The configuration dict MUST contain a field called "workdir", which has a string value. It is validated that this string value is a plausible UNIX directory name.
-The configuration dict MUST contain a field called "hostname", which has a string value. It is validated that this string value is a valid HTTP hostname or IP address.
-The configuration dict MAY contain a field called "ssh-hostname", which has a string value. If not specified, it is equal to "hostname". It is validated that this string value is a valid SSH hostname or IP address.
+The configuration dict MAY contain a field called "hostname", which has a string value. It is validated that this string value is a valid HTTP hostname or IP address. When "hostname" is omitted, the launcher starts the configured process on the local machine instead of over SSH.
+The configuration dict MAY contain a field called "ssh-hostname", which has a string value. If not specified while "hostname" is present, it is equal to "hostname". It is validated that this string value is a valid SSH hostname or IP address. When "hostname" is omitted, "ssh-hostname" must also be omitted.
 
 The configuration dict MUST contain two fields called "key" and "command", each with a string value. 
 For each, the value is interpreted as a Python f-string inside a particular namespace:
@@ -38,9 +38,11 @@ If it doesn't, delete the local JSON file, and then proceed under possibility B
 (unless possibility B was already encountered, in which case an error must be reported).
 
 B. The local JSON file does not exist. 
-In that case, create an SSH connection to "ssh-hostname". 
+In that case:
+- If "hostname" is defined, create an SSH connection to "ssh-hostname" and manage the process remotely.
+- If "hostname" is not defined, launch and manage the process directly on the local machine.
 
-On the SSH host, there is a global connection file directory, by default $HOME/.remote-http-launcher/server
+On the SSH host (or locally, when no SSH host is defined), there is a global connection file directory, by default $HOME/.remote-http-launcher/server
 The launcher looks in this directory for a remote JSON file named X.json, where X=the key. 
 
 
@@ -61,7 +63,7 @@ In that case, the remote JSON file is monitored until one of two events happen.
     B. The file modification time has not changed for one minute, and no process with pid exists. In that case, proceed as for scenario 3 (unless scenario 3 was already encountered, in which case an error must be reported).
 
 Scenario 3. The remote JSON file does not exist. 
-In that case, the command will be launched. If there is a field "conda", its value is taken as the command's conda environment. 
+In that case, the command will be launched either remotely over SSH or locally, depending on whether "hostname" was provided. If there is a field "conda", its value is taken as the command's conda environment. 
 It is verified that conda has been installed, and that the conda environment exists. The environment is then activated.
 Then, the command is launched in a subprocess.
 The subprocess is daemonic, and all stdout and stderr of the subprocess are merged and redirected to a temporary log file. 
@@ -87,8 +89,8 @@ Scenario 4. The remote JSON file exists, but one of the verification steps of sc
 
 If scenario 1 has been completed successfully (i.e. the handshake works), create the local JSON file. There are two modes of creation. 
 In direct mode, the JSON file contains the following:
-- "hostname"
-- "ssh-hostname" (if different)
+- "hostname" (or the "network_interface" value returned from the remote JSON if "hostname" was not configured)
+- "ssh-hostname" (if different and applicable)
 - "port"
 In tunneling mode, allocate a free port "localport" on localhost, and create an SSH tunnel from ssh-hostname:port to localhost:localport.
 In that case, the JSON file contains the following:
