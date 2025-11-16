@@ -291,7 +291,9 @@ class Executor:
                 "Conda is not available on the target host and ~/.bashrc does not "
                 "contain a conda initialize block."
             )
-        LOGGER.info("%s discovered conda.sh via ~/.bashrc at %s", self.host, conda_source)
+        LOGGER.info(
+            "%s discovered conda.sh via ~/.bashrc at %s", self.host, conda_source
+        )
         self._conda_source = conda_source
         return self._conda_source
 
@@ -343,7 +345,9 @@ class SSHExecutor(Executor):
             capture_output=True,
         )
         if not silent:
-            LOGGER.info("%s FINISHED executing bash over SSH: %s", self.host, remote_command)
+            LOGGER.info(
+                "%s FINISHED executing bash over SSH: %s", self.host, remote_command
+            )
         return result
 
     def run_python(
@@ -363,7 +367,9 @@ class SSHExecutor(Executor):
         try:
             scp_target = f"{self._host}:{remote_path}"
             if not silent:
-                LOGGER.info("%s uploading temp script via scp to %s", self.host, scp_target)
+                LOGGER.info(
+                    "%s uploading temp script via scp to %s", self.host, scp_target
+                )
             scp = subprocess.run(
                 ["scp", local_path, scp_target], text=True, capture_output=True
             )
@@ -386,7 +392,7 @@ class SSHExecutor(Executor):
                         remote_path,
                     )
                 self.run_shell(
-                    f"rm -f {shlex.quote(remote_path)}", check=False, silent=silent
+                    f"rm -f {shlex.quote(remote_path)}", check=False, silent=True
                 )
         finally:
             try:
@@ -441,7 +447,9 @@ class LocalExecutor(Executor):
         finally:
             try:
                 if not silent:
-                    LOGGER.info("%s removing local temp script %s", self.host, local_path)
+                    LOGGER.info(
+                        "%s removing local temp script %s", self.host, local_path
+                    )
                 os.remove(local_path)
             except OSError:
                 pass
@@ -510,7 +518,9 @@ class RemoteState:
             "import json\n"
             "json.dump(data, sys.stdout)\n"
         )
-        result = self.executor.run_python(script, conda=bool(self.cfg.conda_env))
+        result = self.executor.run_python(
+            script, conda=bool(self.cfg.conda_env), silent=True
+        )
         try:
             return json.loads(result.stdout)
         except json.JSONDecodeError as exc:
@@ -558,7 +568,7 @@ class RemoteState:
         if not isinstance(evaluated_command, str):
             raise LauncherError("The evaluated command must be a string.")
         if not evaluated_command.strip() or "\n" in evaluated_command:
-            raise LauncherError("The command must be a plausiblse bash command.")
+            raise LauncherError("The command must be a plausible bash command.")
 
         command = evaluated_command
         if self.cfg.conda_env:
@@ -609,7 +619,7 @@ class RemoteState:
             "    json.dump(data, handle)\n"
             "stdout_handle.close()\n"
         ).replace("{network!r}", repr(self.cfg.network_interface))
-        self.executor.run_python(script, conda=bool(self.cfg.conda_env))
+        p = self.executor.run_python(script, conda=bool(self.cfg.conda_env))
 
     def verify_port_in_use(self, host: str, port: int) -> None:
         script = (
@@ -626,7 +636,7 @@ class RemoteState:
             "finally:\n"
             "    sock.close()\n"
         )
-        self.executor.run_python(script, conda=bool(self.cfg.conda_env))
+        self.executor.run_python(script, conda=bool(self.cfg.conda_env), silent=True)
 
     def handshake(
         self, host: str, port: int, handshake: HandshakeConfig | None
@@ -828,10 +838,6 @@ def handle_remote(cfg: Configuration, remote: RemoteState) -> Dict[str, Any]:
                 monitored = monitor_remote_start(cfg, remote, data)
                 if monitored is not None:
                     return monitored
-                if attempted_launch:
-                    raise LauncherError(
-                        "Remote process did not finish starting after relaunch."
-                    )
                 log = remote.read_log()
                 if log is not None:
                     LOGGER.error(
@@ -841,6 +847,10 @@ def handle_remote(cfg: Configuration, remote: RemoteState) -> Dict[str, Any]:
                         + log
                     )
                 remote.remove()
+                if attempted_launch:
+                    raise LauncherError(
+                        "Remote process did not finish starting after relaunch."
+                    )
                 continue
             remote.remove()
             attempted_launch = True
@@ -858,6 +868,7 @@ def handle_remote(cfg: Configuration, remote: RemoteState) -> Dict[str, Any]:
                 raise LauncherError(
                     f"Remote conda environment '{cfg.conda_env}' does not exist."
                 )
+        print("START")
         remote.launch_process(conda_base)
         attempted_launch = True
         for _ in range(10):
@@ -892,8 +903,9 @@ def monitor_remote_start(
         t = time.time()
         max_elapse = max(t - last_change, t - last_mtime)
         if max_elapse > 60:
-            if not remote.process_exists(pid):
-                return None
+            return None
+        elif max_elapse > 10 and not remote.process_exists(pid):
+            return None
 
 
 def handle_local(
@@ -940,11 +952,7 @@ def create_local_file(
         if not isinstance(target_host, str) or not target_host:
             raise LauncherError("Unable to determine hostname for local connection.")
         payload = {"hostname": target_host, "port": port}
-        if (
-            cfg.hostname
-            and cfg.ssh_hostname
-            and cfg.ssh_hostname != cfg.hostname
-        ):
+        if cfg.hostname and cfg.ssh_hostname and cfg.ssh_hostname != cfg.hostname:
             payload["ssh-hostname"] = cfg.ssh_hostname
     local_state.write(payload)
     perform_local_handshake(payload["hostname"], payload["port"], cfg.handshake)
