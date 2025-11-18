@@ -254,12 +254,18 @@ class Executor:
     def run_shell(
         self, command: str, *, check: bool = True, conda: bool = False, silent=False
     ) -> subprocess.CompletedProcess:
+        snippet = command[:30]
+        if len(command) > 30:
+            snippet += " [...]"
+            if len(command) > 65:
+                snippet += command[-30:]
+
         if not silent:
             LOGGER.info(
                 "%s run_shell requested command (conda=%s): %s",
                 self.host,
                 conda,
-                command,
+                snippet,
             )
         final_command = command
         if conda:
@@ -267,15 +273,17 @@ class Executor:
             if conda_source:
                 final_command = f"source {shlex.quote(conda_source)} && {final_command}"
         if not silent:
-            LOGGER.info("%s run_shell final command: %s", self.host, final_command)
-        result = self._run_bash(final_command, silent=silent)
+            LOGGER.debug("%s run_shell final command: %s", self.host, final_command)
+        result = self._run_bash(final_command, snippet=snippet, silent=silent)
         if check and result.returncode != 0:
             raise LauncherError(
                 f"{self.host} command failed: {final_command}\n{result.stderr.strip()}"
             )
         return result
 
-    def _run_bash(self, command: str, *, silent=False) -> subprocess.CompletedProcess:
+    def _run_bash(
+        self, command: str, *, snippet=None, silent=False
+    ) -> subprocess.CompletedProcess:
         raise NotImplementedError
 
     def _ensure_conda_setup(self) -> Optional[str]:
@@ -339,13 +347,17 @@ class SSHExecutor(Executor):
         super().__init__(f"SSHExecutor[{host}]")
         self._host = host
 
-    def _run_bash(self, command: str, *, silent=False) -> subprocess.CompletedProcess:
+    def _run_bash(
+        self, command: str, *, snippet=None, silent=False
+    ) -> subprocess.CompletedProcess:
+        if snippet is None:
+            snippet = command
         remote_command = f"bash -lc {shlex.quote(command)}"
         if not silent:
             LOGGER.info(
                 "%s executing bash over SSH: %s",
                 self.host,
-                remote_command,
+                snippet,
             )
         result = subprocess.run(
             ["ssh", self._host, remote_command],
@@ -353,67 +365,22 @@ class SSHExecutor(Executor):
             capture_output=True,
         )
         if not silent:
-            LOGGER.info(
-                "%s FINISHED executing bash over SSH: %s", self.host, remote_command
-            )
+            LOGGER.info("%s FINISHED executing bash over SSH: %s", self.host, snippet)
         return result
 
     def run_python(
         self, script: str, *, check: bool = True, conda: bool = False, silent=False
     ) -> subprocess.CompletedProcess:
-        remote_path = f"/tmp/rhl-{uuid.uuid4().hex}.py"
         if not silent:
-            LOGGER.info(
-                "%s preparing remote Python script %s",
-                self.host,
-                remote_path,
+            LOGGER.info("%s preparing remote Python script", self.host)
+            LOGGER.debug("%s Python script contents:\n%s", self.host, script)
+        heredoc_tag = "__RHL_REMOTE_SCRIPT__"
+        if heredoc_tag in script:
+            raise LauncherError(
+                "Generated Python script unexpectedly contained remote heredoc sentinel."
             )
-            LOGGER.info("%s Python script contents:\n%s", self.host, script)
-        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as handle:
-            handle.write(script)
-            local_path = handle.name
-        try:
-            scp_target = f"{self._host}:{remote_path}"
-            if not silent:
-                LOGGER.info(
-                    "%s uploading temp script via scp to %s", self.host, scp_target
-                )
-            scp = subprocess.run(
-                ["scp", local_path, scp_target], text=True, capture_output=True
-            )
-            if scp.returncode != 0:
-                raise LauncherError(
-                    f"SCP upload failed: {scp.stderr.strip() or scp.stdout.strip()}"
-                )
-            try:
-                result = self.run_shell(
-                    f"python3 {shlex.quote(remote_path)}",
-                    check=check,
-                    conda=conda,
-                    silent=silent,
-                )
-            finally:
-                if not silent:
-                    LOGGER.info(
-                        "%s removing remote temp script %s",
-                        self.host,
-                        remote_path,
-                    )
-                self.run_shell(
-                    f"rm -f {shlex.quote(remote_path)}", check=False, silent=True
-                )
-        finally:
-            try:
-                if not silent:
-                    LOGGER.info(
-                        "%s removing local temp script %s",
-                        self.host,
-                        local_path,
-                    )
-                os.remove(local_path)
-            except OSError:
-                pass
-        return result
+        command = f"python3 - <<'{heredoc_tag}'\n{script}\n{heredoc_tag}"
+        return self.run_shell(command, check=check, conda=conda, silent=silent)
 
     def process_exists(self, pid: int) -> bool:
         result = self.run_shell(f"ps -p {pid} -o pid=", check=False, silent=True)
@@ -424,16 +391,20 @@ class LocalExecutor(Executor):
     def __init__(self):
         super().__init__("LocalExecutor")
 
-    def _run_bash(self, command: str, *, silent=False) -> subprocess.CompletedProcess:
+    def _run_bash(
+        self, command: str, *, snippet=None, silent=False
+    ) -> subprocess.CompletedProcess:
+        if snippet is None:
+            snippet = command
         if not silent:
-            LOGGER.info("%s executing bash locally: %s", self.host, command)
+            LOGGER.info("%s executing bash locally: %s", self.host, snippet)
         result = subprocess.run(
             ["bash", "-lc", command],
             text=True,
             capture_output=True,
         )
         if not silent:
-            LOGGER.info("%s FINISHED executing bash locally: %s", self.host, command)
+            LOGGER.info("%s FINISHED executing bash locally: %s", self.host, snippet)
         return result
 
     def run_python(
@@ -441,27 +412,14 @@ class LocalExecutor(Executor):
     ) -> subprocess.CompletedProcess:
         if not silent:
             LOGGER.info("%s preparing local Python script", self.host)
-            LOGGER.info("%s Python script contents:\n%s", self.host, script)
-        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as handle:
-            handle.write(script)
-            local_path = handle.name
-        try:
-            result = self.run_shell(
-                f"python3 {shlex.quote(local_path)}",
-                check=check,
-                conda=conda,
-                silent=silent,
+            LOGGER.debug("%s Python script contents:\n%s", self.host, script)
+        heredoc_tag = "__RHL_LOCAL_SCRIPT__"
+        if heredoc_tag in script:
+            raise LauncherError(
+                "Generated Python script unexpectedly contained heredoc sentinel."
             )
-        finally:
-            try:
-                if not silent:
-                    LOGGER.info(
-                        "%s removing local temp script %s", self.host, local_path
-                    )
-                os.remove(local_path)
-            except OSError:
-                pass
-        return result
+        command = f"python3 - <<'{heredoc_tag}'\n{script}\n{heredoc_tag}"
+        return self.run_shell(command, check=check, conda=conda, silent=silent)
 
     def process_exists(self, pid: int) -> bool:
         result = subprocess.run(
