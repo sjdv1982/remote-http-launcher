@@ -49,6 +49,24 @@ class LauncherError(RuntimeError):
 
 
 LOGGER = logging.getLogger(__name__)
+_LOGGER_CONFIGURED = False
+
+
+def _configure_module_logger() -> None:
+    global _LOGGER_CONFIGURED
+    if _LOGGER_CONFIGURED:
+        return
+    if LOGGER.handlers:
+        _LOGGER_CONFIGURED = True
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    LOGGER.addHandler(handler)
+    LOGGER.setLevel(logging.INFO)
+    LOGGER.propagate = False
+    _LOGGER_CONFIGURED = True
 
 
 @dataclasses.dataclass
@@ -75,10 +93,13 @@ class Configuration:
     def from_yaml(path: pathlib.Path) -> "Configuration":
         with path.open("r", encoding="utf-8") as handle:
             data = yaml.safe_load(handle)
+        return Configuration.from_mapping(data)
+
+    @staticmethod
+    def from_mapping(data: Dict[str, Any]) -> "Configuration":
         if not isinstance(data, dict):
-            raise LauncherError("Configuration YAML must define a mapping.")
-        cfg = Configuration._validate_and_build(data)
-        return cfg
+            raise LauncherError("Configuration mapping must be a dictionary.")
+        return Configuration._validate_and_build(data)
 
     @staticmethod
     def _validate_and_build(data: Dict[str, Any]) -> "Configuration":
@@ -1018,7 +1039,6 @@ def handle_remote(cfg: Configuration, remote: RemoteState) -> Dict[str, Any]:
                 raise LauncherError(
                     f"Remote conda environment '{cfg.conda_env}' does not exist."
                 )
-        print("START")
         remote.launch_process(conda_base)
         attempted_launch = True
         for _ in range(10):
@@ -1110,6 +1130,52 @@ def create_local_file(
     return payload
 
 
+def _execute(
+    cfg: Configuration, connection_dir: Optional[pathlib.Path]
+) -> Dict[str, Any]:
+    local_state = LocalState.build(cfg, connection_dir)
+
+    try:
+        local_result = handle_local(cfg, local_state)
+        if local_result:
+            return local_result
+    except LauncherError:
+        pass
+
+    remote_dir = _default_server_directory()
+    if cfg.hostname:
+        if not cfg.ssh_hostname:
+            raise LauncherError(
+                "ssh_hostname must be provided when hostname is configured."
+            )
+        executor: Executor = SSHExecutor(cfg.ssh_hostname)
+    else:
+        executor = LocalExecutor()
+    remote = RemoteState(executor, cfg, remote_dir.as_posix())
+    remote_result = handle_remote(cfg, remote)
+
+    return create_local_file(cfg, local_state, remote_result)
+
+
+def run(
+    config: Dict[str, Any],
+    *,
+    connection_dir: pathlib.Path | str | None = None,
+) -> Dict[str, Any]:
+    """Programmatic API returning the local connection payload.
+
+    Connection dir defaults to ~/.remote-http-launcher/client
+    """
+    _configure_module_logger()
+    cfg = Configuration.from_mapping(config)
+    override_dir: Optional[pathlib.Path]
+    if connection_dir is None:
+        override_dir = None
+    else:
+        override_dir = pathlib.Path(connection_dir).expanduser()
+    return _execute(cfg, override_dir)
+
+
 def main(argv: list[str] | None = None) -> int:
     if not logging.getLogger().handlers:
         logging.basicConfig(
@@ -1128,28 +1194,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cfg = Configuration.from_yaml(args.config)
-    local_state = LocalState.build(cfg, args.connection_dir)
-
-    try:
-        local_result = handle_local(cfg, local_state)
-        if local_result:
-            return 0
-    except LauncherError:
-        pass
-
-    remote_dir = _default_server_directory()
-    if cfg.hostname:
-        if not cfg.ssh_hostname:
-            raise LauncherError(
-                "ssh_hostname must be provided when hostname is configured."
-            )
-        executor: Executor = SSHExecutor(cfg.ssh_hostname)
-    else:
-        executor = LocalExecutor()
-    remote = RemoteState(executor, cfg, remote_dir.as_posix())
-    remote_result = handle_remote(cfg, remote)
-
-    create_local_file(cfg, local_state, remote_result)
+    _execute(cfg, args.connection_dir)
     return 0
 
 
