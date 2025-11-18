@@ -17,7 +17,7 @@ properties:
   hostname:
     $ref: "#/$defs/hostnameOrIp"
     description: Target HTTP hostname or IP.
-  ssh-hostname:
+  ssh_hostname:
     $ref: "#/$defs/hostnameOrIp"
     description: SSH host to connect to; defaults to hostname when omitted.
   key:
@@ -35,6 +35,11 @@ properties:
     $ref: "#/$defs/hostname"
     default: localhost
     description: Network interface name the remote service binds to; defaults to localhost.
+  tunnel:
+    type: boolean
+    default: false
+    description: >
+      When true, create an SSH tunnel from ssh_hostname:port to localhost and store the forwarded port in the client JSON file.
   handshake:
     oneOf:
       - type: string

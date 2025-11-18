@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import traceback
 import urllib.error
@@ -65,6 +66,7 @@ class Configuration:
     command_template: str
     network_interface: str
     handshake: HandshakeConfig | None
+    tunnel: bool
     conda_env: Optional[str]
     namespace: Dict[str, Any]
     raw: Dict[str, Any]
@@ -96,15 +98,15 @@ class Configuration:
             hostname = raw_hostname
 
         ssh_hostname: Optional[str]
-        raw_ssh = data.get("ssh-hostname", hostname)
+        raw_ssh = data.get("ssh_hostname", hostname)
         if raw_ssh is None:
             ssh_hostname = None
         else:
             if not isinstance(raw_ssh, str):
-                raise LauncherError("ssh-hostname must be a string when provided.")
+                raise LauncherError("ssh_hostname must be a string when provided.")
             if not _is_valid_hostname_or_ip(raw_ssh):
                 raise LauncherError(
-                    "ssh-hostname must be a valid SSH hostname or IP address."
+                    "ssh_hostname must be a valid SSH hostname or IP address."
                 )
             ssh_hostname = raw_ssh
 
@@ -117,6 +119,11 @@ class Configuration:
             )
 
         handshake = Configuration._parse_handshake(data.get("handshake"))
+
+        raw_tunnel = data.get("tunnel", False)
+        if not isinstance(raw_tunnel, bool):
+            raise LauncherError("tunnel must be a boolean when provided.")
+        tunnel = raw_tunnel
 
         namespace: Dict[str, Any] = {}
         for key, value in data.items():
@@ -152,6 +159,7 @@ class Configuration:
             command_template=command_template,
             network_interface=network_interface,
             handshake=handshake,
+            tunnel=tunnel,
             conda_env=conda_env,
             namespace=namespace,
             raw=data,
@@ -595,6 +603,7 @@ class RemoteState:
             "stdout_handle = open(log_file.as_posix(), 'ab', buffering=0)\n"
             f"command = {command!r}\n"
             f"workdir = pathlib.Path({self.cfg.workdir!r}).expanduser()\n"
+            "workdir.mkdir(parents=True, exist_ok=True)\n"
             "proc = subprocess.Popen(\n"
             "    command,\n"
             "    shell=True,\n"
@@ -767,21 +776,204 @@ def allocate_local_port() -> int:
         return int(port)
 
 
+TUNNEL_MONITOR_SCRIPT = textwrap.dedent(
+    """
+    import argparse
+    import json
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+
+    def write_status(path, state, message=None):
+        tmp_path = f"{path}.tmp"
+        payload = {"status": state}
+        if message:
+            payload["message"] = message
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        os.replace(tmp_path, path)
+
+
+    def remote_pid_exists(ssh_host, remote_pid):
+        result = subprocess.run(
+            ["ssh", ssh_host, "kill", "-0", str(remote_pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return result.returncode == 0
+
+
+    def main():
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--ssh-host", required=True)
+        parser.add_argument("--remote-host", required=True)
+        parser.add_argument("--remote-port", type=int, required=True)
+        parser.add_argument("--local-port", type=int, required=True)
+        parser.add_argument("--remote-pid", type=int, required=True)
+        parser.add_argument("--status-path", required=True)
+        args = parser.parse_args()
+
+        try:
+            os.unlink(args.status_path)
+        except FileNotFoundError:
+            pass
+
+        ssh_cmd = [
+            "ssh",
+            "-N",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-L",
+            f"{args.local_port}:{args.remote_host}:{args.remote_port}",
+            args.ssh_host,
+        ]
+        try:
+            tunnel_proc = subprocess.Popen(
+                ssh_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as exc:  # pragma: no cover - platform dependent
+            write_status(args.status_path, "error", f"Unable to launch ssh: {exc}")
+            return 1
+
+        time.sleep(0.5)
+        if tunnel_proc.poll() is not None:
+            err = ""
+            if tunnel_proc.stderr:
+                try:
+                    err = tunnel_proc.stderr.read().strip()
+                except Exception:  # pragma: no cover - best effort
+                    err = ""
+            write_status(
+                args.status_path,
+                "error",
+                err or "ssh exited before establishing the tunnel.",
+            )
+            return 1
+
+        if tunnel_proc.stderr:
+            tunnel_proc.stderr.close()
+
+        write_status(args.status_path, "ready", None)
+
+        stop = False
+
+        def request_stop(_signum, _frame):
+            nonlocal stop
+            stop = True
+
+        signal.signal(signal.SIGTERM, request_stop)
+        signal.signal(signal.SIGINT, request_stop)
+
+        try:
+            while not stop:
+                time.sleep(20.0)
+                if tunnel_proc.poll() is not None:
+                    return 0
+                if not remote_pid_exists(args.ssh_host, args.remote_pid):
+                    break
+        finally:
+            if tunnel_proc.poll() is None:
+                tunnel_proc.terminate()
+                try:
+                    tunnel_proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    tunnel_proc.kill()
+        return 0
+
+
+    if __name__ == "__main__":  # pragma: no cover - executed in subprocess
+        sys.exit(main())
+    """
+)
+
+
+def _wait_for_tunnel_ready(process: subprocess.Popen, status_path: str) -> None:
+    start_time = time.time()
+    while time.time() - start_time < 15.0:
+        if process.poll() is not None:
+            raise LauncherError(
+                "Tunnel monitor exited before reporting readiness. "
+                "Check SSH connectivity or credentials."
+            )
+        if os.path.exists(status_path):
+            try:
+                with open(status_path, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except json.JSONDecodeError:
+                time.sleep(0.1)
+                continue
+            status = payload.get("status")
+            if status == "ready":
+                return
+            if status == "error":
+                message = payload.get("message", "Unknown error")
+                raise LauncherError(f"Failed to establish SSH tunnel: {message}")
+        time.sleep(0.1)
+    raise LauncherError("Timed out while waiting for SSH tunnel to become ready.")
+
+
+def _terminate_process(proc: subprocess.Popen) -> None:
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def establish_tunnel(
-    ssh_host: str, remote_host: str, remote_port: int, local_port: int
+    ssh_host: str,
+    remote_host: str,
+    remote_port: int,
+    local_port: int,
+    remote_pid: int,
 ) -> None:
-    raise NotImplementedError("Need tunnel PID!")  ###
+    status_handle = tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8")
+    status_path = status_handle.name
+    status_handle.close()
+    try:
+        os.unlink(status_path)
+    except FileNotFoundError:
+        pass
     cmd = [
-        "ssh",
-        "-f",
-        "-N",
-        "-L",
-        f"{local_port}:{remote_host}:{remote_port}",
+        sys.executable,
+        "-c",
+        TUNNEL_MONITOR_SCRIPT,
+        "--ssh-host",
         ssh_host,
+        "--remote-host",
+        remote_host,
+        "--remote-port",
+        str(remote_port),
+        "--local-port",
+        str(local_port),
+        "--remote-pid",
+        str(remote_pid),
+        "--status-path",
+        status_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise LauncherError(f"Failed to establish SSH tunnel: {result.stderr.strip()}")
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        _wait_for_tunnel_ready(process, status_path)
+    except Exception:
+        _terminate_process(process)
+        raise
+    finally:
+        try:
+            os.unlink(status_path)
+        except FileNotFoundError:
+            pass
 
 
 def _fetch_conda_base(executor: Executor) -> Optional[str]:
@@ -932,16 +1124,17 @@ def create_local_file(
     cfg: Configuration,
     local_state: LocalState,
     remote_data: Dict[str, Any],
-    tunnel: bool,
 ) -> Dict[str, Any]:
     port = int(remote_data["port"])
-    if tunnel:
+    if cfg.tunnel:
         if cfg.hostname is None or cfg.ssh_hostname is None:
             raise LauncherError(
-                "SSH tunneling requires hostname and ssh-hostname to be configured."
+                "SSH tunneling requires hostname and ssh_hostname to be configured."
             )
         local_port = allocate_local_port()
-        establish_tunnel(cfg.ssh_hostname, cfg.hostname, port, local_port)
+        establish_tunnel(
+            cfg.ssh_hostname, cfg.hostname, port, local_port, int(remote_data["pid"])
+        )
         payload: Dict[str, Any] = {"hostname": "localhost", "port": local_port}
     else:
         target_host = (
@@ -953,7 +1146,7 @@ def create_local_file(
             raise LauncherError("Unable to determine hostname for local connection.")
         payload = {"hostname": target_host, "port": port}
         if cfg.hostname and cfg.ssh_hostname and cfg.ssh_hostname != cfg.hostname:
-            payload["ssh-hostname"] = cfg.ssh_hostname
+            payload["ssh_hostname"] = cfg.ssh_hostname
     local_state.write(payload)
     perform_local_handshake(payload["hostname"], payload["port"], cfg.handshake)
     return payload
@@ -974,11 +1167,6 @@ def main(argv: list[str] | None = None) -> int:
         type=pathlib.Path,
         help="Override the connection directory. Defaults to ~/.remote-http-launcher/client",
     )
-    parser.add_argument(
-        "--tunnel",
-        action="store_true",
-        help="Create an SSH tunnel instead of a direct connection.",
-    )
     args = parser.parse_args(argv)
 
     cfg = Configuration.from_yaml(args.config)
@@ -995,7 +1183,7 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.hostname:
         if not cfg.ssh_hostname:
             raise LauncherError(
-                "ssh-hostname must be provided when hostname is configured."
+                "ssh_hostname must be provided when hostname is configured."
             )
         executor: Executor = SSHExecutor(cfg.ssh_hostname)
     else:
@@ -1003,7 +1191,7 @@ def main(argv: list[str] | None = None) -> int:
     remote = RemoteState(executor, cfg, remote_dir.as_posix())
     remote_result = handle_remote(cfg, remote)
 
-    create_local_file(cfg, local_state, remote_result, args.tunnel)
+    create_local_file(cfg, local_state, remote_result)
     return 0
 
 

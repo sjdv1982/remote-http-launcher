@@ -2,7 +2,7 @@
   "ui:order": [
     "workdir",
     "hostname",
-    "ssh-hostname",
+    "ssh_hostname",
     "network_interface",
     "key",
     "command",
@@ -16,7 +16,7 @@
   "hostname": {
     "ui:placeholder": "example.com"
   },
-  "ssh-hostname": {
+  "ssh_hostname": {
     "ui:placeholder": "ssh.example.com",
     "ui:help": "If omitted, defaults to the HTTP hostname."
   },

@@ -2,7 +2,7 @@ The remote HTTP launcher reads a YAML configuration file. Loading that configura
 
 The configuration dict MUST contain a field called "workdir", which has a string value. It is validated that this string value is a plausible UNIX directory name.
 The configuration dict MAY contain a field called "hostname", which has a string value. It is validated that this string value is a valid HTTP hostname or IP address. When "hostname" is omitted, the launcher starts the configured process on the local machine instead of over SSH.
-The configuration dict MAY contain a field called "ssh-hostname", which has a string value. If not specified while "hostname" is present, it is equal to "hostname". It is validated that this string value is a valid SSH hostname or IP address. When "hostname" is omitted, "ssh-hostname" must also be omitted.
+The configuration dict MAY contain a field called "ssh_hostname", which has a string value. If not specified while "hostname" is present, it is equal to "hostname". It is validated that this string value is a valid SSH hostname or IP address. When "hostname" is omitted, "ssh_hostname" must also be omitted.
 
 The configuration dict MUST contain two fields called "key" and "command", each with a string value. 
 For each, the value is interpreted as a Python f-string inside a particular namespace:
@@ -20,6 +20,8 @@ The configuration dict MAY contain a field called "handshake", which must contai
 
 The configuration dict MAY contain a field called "network_interface". If not, its value defaults to "localhost". 
 It is validated that this string value is a valid HTTP hostname.
+
+The configuration dict MAY contain a boolean field called "tunnel". When true, the launcher creates an SSH tunnel that forwards the remote service port to an automatically chosen local port. This requires both "hostname" and "ssh-hostname" (explicitly or implicitly) to be configured. When omitted, tunneling defaults to false.
 
 There is a global connection file directory, by default $HOME/.remote-http-launcher/client
 The launcher looks in this directory for a local JSON file named X.json, where X=the key. 
@@ -39,7 +41,7 @@ If it doesn't, delete the local JSON file, and then proceed under possibility B
 
 B. The local JSON file does not exist. 
 In that case:
-- If "hostname" is defined, create an SSH connection to "ssh-hostname" and manage the process remotely.
+- If "hostname" is defined, create an SSH connection to "ssh_hostname" and manage the process remotely.
 - If "hostname" is not defined, launch and manage the process directly on the local machine.
 
 On the SSH host (or locally, when no SSH host is defined), there is a global connection file directory, by default $HOME/.remote-http-launcher/server
@@ -90,9 +92,9 @@ Scenario 4. The remote JSON file exists, but one of the verification steps of sc
 If scenario 1 has been completed successfully (i.e. the handshake works), create the local JSON file. There are two modes of creation. 
 In direct mode, the JSON file contains the following:
 - "hostname" (or the "network_interface" value returned from the remote JSON if "hostname" was not configured)
-- "ssh-hostname" (if different and applicable)
+- "ssh_hostname" (if different and applicable)
 - "port"
-In tunneling mode, allocate a free port "localport" on localhost, and create an SSH tunnel from ssh-hostname:port to localhost:localport.
+In tunneling mode, allocate a free port "localport" on localhost, and create an SSH tunnel from ssh_hostname:port to localhost:localport.
 In that case, the JSON file contains the following:
 - "hostname" but with the value: "localhost"
 - "port" but with the value of the localport
