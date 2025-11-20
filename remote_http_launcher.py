@@ -253,8 +253,12 @@ class LocalState:
 
     def write(self, payload: Dict[str, Any]) -> None:
         tmp_path = self.json_path.with_suffix(".tmp")
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle)
+        if sys.is_finalizing():
+            # Precarious circumstances. Don't use "with
+            open(tmp_path, "w", buffering=False).write(json.dumps(payload))
+        else:
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
         os.chmod(tmp_path, LOCAL_JSON_PERMS)
         tmp_path.replace(self.json_path)
 
