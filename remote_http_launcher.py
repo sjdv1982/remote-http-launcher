@@ -84,6 +84,7 @@ class Configuration:
     command_template: str
     network_interface: str
     handshake: HandshakeConfig | None
+    file_parameters: Dict[str, Any] | None
     tunnel: bool
     conda_env: Optional[str]
     namespace: Dict[str, Any]
@@ -140,6 +141,9 @@ class Configuration:
             )
 
         handshake = Configuration._parse_handshake(data.get("handshake"))
+        file_parameters = Configuration._parse_file_parameters(
+            data.get("file_parameters")
+        )
 
         raw_tunnel = data.get("tunnel", False)
         if not isinstance(raw_tunnel, bool):
@@ -180,6 +184,7 @@ class Configuration:
             command_template=command_template,
             network_interface=network_interface,
             handshake=handshake,
+            file_parameters=file_parameters,
             tunnel=tunnel,
             conda_env=conda_env,
             namespace=namespace,
@@ -210,6 +215,20 @@ class Configuration:
         raise LauncherError(
             "handshake must be a string path or a mapping with path and parameters."
         )
+
+    @staticmethod
+    def _parse_file_parameters(value: Any) -> Dict[str, Any] | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise LauncherError("file_parameters must be a mapping when provided.")
+        try:
+            json.dumps(value)
+        except TypeError as exc:
+            raise LauncherError(
+                "file_parameters must contain JSON-serializable values."
+            ) from exc
+        return value
 
     @staticmethod
     def _require_string(data: Dict[str, Any], key: str) -> str:
@@ -562,6 +581,11 @@ class RemoteState:
             raise LauncherError("The command must be a plausible bash command.")
 
         command = evaluated_command
+        parameters_literal = (
+            json.dumps(self.cfg.file_parameters)
+            if self.cfg.file_parameters is not None
+            else "null"
+        )
         if self.cfg.conda_env:
             if not conda_base:
                 raise LauncherError(
@@ -607,10 +631,15 @@ class RemoteState:
             "network_interface = {network!r}\n"
             "if network_interface is not None:\n"
             "    data['network_interface'] = network_interface\n"
+            "parameters = json.loads({parameters_literal!r})\n"
+            "if parameters is not None:\n"
+            "    data['parameters'] = parameters\n"
             "with json_path.open('w', encoding='utf-8') as handle:\n"
             "    json.dump(data, handle)\n"
             "stdout_handle.close()\n"
-        ).replace("{network!r}", repr(self.cfg.network_interface))
+        ).replace("{network!r}", repr(self.cfg.network_interface)).replace(
+            "{parameters_literal!r}", repr(parameters_literal)
+        )
         p = self.executor.run_python(script, conda=bool(self.cfg.conda_env))
 
     def verify_port_in_use(self, host: str, port: int) -> None:
@@ -746,6 +775,8 @@ def validate_remote_running_state(data: Dict[str, Any]) -> None:
         raise LauncherError(
             "Remote JSON network_interface must be a string when present."
         )
+    if "parameters" in data and not isinstance(data["parameters"], dict):
+        raise LauncherError("Remote JSON parameters must be a mapping when present.")
     if not isinstance(data.get("uid"), int):
         raise LauncherError("Remote JSON must include uid.")
     if not isinstance(data.get("pid"), int):

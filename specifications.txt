@@ -3,6 +3,7 @@ The remote HTTP launcher reads a YAML configuration file. Loading that configura
 The configuration dict MUST contain a field called "workdir", which has a string value. It is validated that this string value is a plausible UNIX directory name.
 The configuration dict MAY contain a field called "hostname", which has a string value. It is validated that this string value is a valid HTTP hostname or IP address. When "hostname" is omitted, the launcher starts the configured process on the local machine instead of over SSH.
 The configuration dict MAY contain a field called "ssh_hostname", which has a string value. If not specified while "hostname" is present, it is equal to "hostname". It is validated that this string value is a valid SSH hostname or IP address. When "hostname" is omitted, "ssh_hostname" must also be omitted.
+The configuration dict MAY contain a field called "file_parameters", which has a dict value.
 
 The configuration dict MUST contain two fields called "key" and "command", each with a string value. 
 For each, the value is interpreted as a Python f-string inside a particular namespace:
@@ -79,6 +80,7 @@ It will contain the following fields:
 - "uid": the current user ID  
 - "pid": the process ID of the subprocess
 - "status" with a value of "starting"
+- "parameters" (optional): containing the value of "file_parameters", if defined.
 The command is expected to:
 - Wait up to a minute until the JSON file exists
 - Acquire a free port

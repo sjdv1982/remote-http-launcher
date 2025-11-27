@@ -60,6 +60,10 @@ properties:
               type: string
             propertyNames:
               pattern: "^[A-Za-z0-9._~-]+$"
+  file_parameters:
+    type: object
+    description: Parameters written into the remote JSON file when provided.
+    additionalProperties: true
   conda:
     type: string
     description: Name of the remote conda environment to activate before launching the command.
