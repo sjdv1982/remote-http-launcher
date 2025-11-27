@@ -1117,7 +1117,15 @@ def create_local_file(
         establish_tunnel(
             cfg.ssh_hostname, cfg.hostname, port, local_port, int(remote_data["pid"])
         )
-        payload: Dict[str, Any] = {"hostname": "localhost", "port": local_port}
+        payload: Dict[str, Any] = {
+            "hostname": "localhost",
+            "port": local_port,
+            "tunneled-host": cfg.ssh_hostname,
+            "tunneled-port": port,
+            "tunneled-network-interface": remote_data.get(
+                "network_interface", cfg.network_interface
+            ),
+        }
     else:
         target_host = (
             cfg.hostname
