@@ -598,64 +598,70 @@ class RemoteState:
             command = activation
 
         script = (
-            "import json, pathlib, tempfile, os, subprocess, sys\n"
-            f"remote_dir = pathlib.Path({self.remote_dir!r}).expanduser()\n"
-            "remote_dir.mkdir(parents=True, exist_ok=True)\n"
-            f"json_path = pathlib.Path({self.json_path!r}).expanduser()\n"
-            f"log_file = pathlib.Path({self.log_path!r}).expanduser()\n"
-            "try:\n"
-            "    log_file.unlink()\n"
-            "except FileNotFoundError:\n"
-            "    pass\n"
-            "stdout_handle = open(log_file.as_posix(), 'ab', buffering=0)\n"
-            f"command = {command!r}\n"
-            f"workdir = pathlib.Path({self.cfg.workdir!r}).expanduser()\n"
-            "workdir.mkdir(parents=True, exist_ok=True)\n"
-            "proc = subprocess.Popen(\n"
-            "    command,\n"
-            "    shell=True,\n"
-            "    cwd=workdir,\n"
-            "    stdout=stdout_handle,\n"
-            "    stderr=subprocess.STDOUT,\n"
-            "    start_new_session=True,\n"
-            "    executable='/bin/bash',\n"
-            ")\n"
-            "data = {\n"
-            f"    'workdir': {self.cfg.workdir!r},\n"
-            "    'log': log_file.as_posix(),\n"
-            f"    'command': {evaluated_command!r},\n"
-            "    'uid': os.getuid(),\n"
-            "    'pid': proc.pid,\n"
-            "    'status': 'starting',\n"
-            "}\n"
-            "network_interface = {network!r}\n"
-            "if network_interface is not None:\n"
-            "    data['network_interface'] = network_interface\n"
-            "parameters = json.loads({parameters_literal!r})\n"
-            "if parameters is not None:\n"
-            "    data['parameters'] = parameters\n"
-            "with json_path.open('w', encoding='utf-8') as handle:\n"
-            "    json.dump(data, handle)\n"
-            "stdout_handle.close()\n"
-        ).replace("{network!r}", repr(self.cfg.network_interface)).replace(
-            "{parameters_literal!r}", repr(parameters_literal)
+            (
+                "import json, pathlib, tempfile, os, subprocess, sys\n"
+                f"remote_dir = pathlib.Path({self.remote_dir!r}).expanduser()\n"
+                "remote_dir.mkdir(parents=True, exist_ok=True)\n"
+                f"json_path = pathlib.Path({self.json_path!r}).expanduser()\n"
+                f"log_file = pathlib.Path({self.log_path!r}).expanduser()\n"
+                "try:\n"
+                "    log_file.unlink()\n"
+                "except FileNotFoundError:\n"
+                "    pass\n"
+                "stdout_handle = open(log_file.as_posix(), 'ab', buffering=0)\n"
+                f"command = {command!r}\n"
+                f"workdir = pathlib.Path({self.cfg.workdir!r}).expanduser()\n"
+                "workdir.mkdir(parents=True, exist_ok=True)\n"
+                "proc = subprocess.Popen(\n"
+                "    command,\n"
+                "    shell=True,\n"
+                "    cwd=workdir,\n"
+                "    stdout=stdout_handle,\n"
+                "    stderr=subprocess.STDOUT,\n"
+                "    start_new_session=True,\n"
+                "    executable='/bin/bash',\n"
+                ")\n"
+                "data = {\n"
+                f"    'workdir': {self.cfg.workdir!r},\n"
+                "    'log': log_file.as_posix(),\n"
+                f"    'command': {evaluated_command!r},\n"
+                "    'uid': os.getuid(),\n"
+                "    'pid': proc.pid,\n"
+                "    'status': 'starting',\n"
+                "}\n"
+                "network_interface = {network!r}\n"
+                "if network_interface is not None:\n"
+                "    data['network_interface'] = network_interface\n"
+                "parameters = json.loads({parameters_literal!r})\n"
+                "if parameters is not None:\n"
+                "    data['parameters'] = parameters\n"
+                "with json_path.open('w', encoding='utf-8') as handle:\n"
+                "    json.dump(data, handle)\n"
+                "stdout_handle.close()\n"
+            )
+            .replace("{network!r}", repr(self.cfg.network_interface))
+            .replace("{parameters_literal!r}", repr(parameters_literal))
         )
         p = self.executor.run_python(script, conda=bool(self.cfg.conda_env))
 
     def verify_port_in_use(self, host: str, port: int) -> None:
         script = (
-            "import socket, sys\n"
+            "import socket, sys, time\n"
             f"host = {host!r}\n"
             f"port = {port}\n"
-            "sock = socket.socket()\n"
-            "sock.settimeout(2.0)\n"
-            "try:\n"
-            "    sock.connect((host, port))\n"
-            "except Exception as exc:\n"
-            "    print(str(exc), file=sys.stderr)\n"
-            "    sys.exit(1)\n"
-            "finally:\n"
-            "    sock.close()\n"
+            "for trial in range(3):\n"
+            "    sock = socket.socket()\n"
+            "    sock.settimeout(2.0)\n"
+            "    try:\n"
+            "        sock.connect((host, port))\n"
+            "    except Exception as exc:\n"
+            "        if trial < 2:\n"
+            "            time.sleep(2)\n"
+            "            continue\n"
+            "        print(str(exc), file=sys.stderr)\n"
+            "        sys.exit(1)\n"
+            "    finally:\n"
+            "        sock.close()\n"
         )
         self.executor.run_python(script, conda=bool(self.cfg.conda_env), silent=True)
 
@@ -751,16 +757,20 @@ def build_handshake_url(host: str, port: int, handshake: HandshakeConfig | None)
 
 
 def perform_local_handshake(
-    host: str, port: int, handshake: HandshakeConfig | None
+    host: str, port: int, handshake: HandshakeConfig | None, trials: int
 ) -> None:
     url = build_handshake_url(host, port, handshake)
-    try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            status = getattr(response, "status", 200)
-            if not (200 <= status < 300):
-                raise LauncherError(f"Handshake failed with HTTP status {status}.")
-    except urllib.error.URLError as exc:
-        raise LauncherError(f"Handshake failed: {exc}") from exc
+    for trial in range(trials):
+        try:
+            with urllib.request.urlopen(url, timeout=10) as response:
+                status = getattr(response, "status", 200)
+                if not (200 <= status < 300):
+                    raise LauncherError(f"Handshake failed with HTTP status {status}.")
+        except urllib.error.URLError as exc:
+            if trial < trials - 1:
+                time.sleep(3)
+                continue
+            raise LauncherError(f"Handshake failed: {exc}") from exc
 
 
 def validate_remote_running_state(data: Dict[str, Any]) -> None:
@@ -1031,13 +1041,17 @@ def handle_remote(cfg: Configuration, remote: RemoteState) -> Dict[str, Any]:
                     remote.remove()
                     continue
 
-                try:
-                    remote.handshake(target_host, data["port"], cfg.handshake)
-                except LauncherError as exc:
-                    traceback.print_exc()
-                    remote.kill_process(pid)
-                    remote.remove()
-                    continue
+                for trial in range(5):
+                    try:
+                        remote.handshake(target_host, data["port"], cfg.handshake)
+                    except Exception as exc:
+                        if trial < 4:
+                            time.sleep(3)
+                            continue
+                        traceback.print_exc()
+                        remote.kill_process(pid)
+                        remote.remove()
+                        continue
 
                 return data
             if status == "starting" and isinstance(data.get("pid"), int):
@@ -1098,7 +1112,14 @@ def monitor_remote_start(
             validate_remote_running_state(data)
             target_host = data.get("network_interface", cfg.network_interface)
             remote.verify_port_in_use(target_host, data["port"])
-            remote.handshake(target_host, data["port"], cfg.handshake)
+            for trial in range(3):
+                try:
+                    remote.handshake(target_host, data["port"], cfg.handshake)
+                except Exception as exc:
+                    if trial < 2:
+                        time.sleep(2)
+                        continue
+                    raise exc from None
             return data
         mtime = float(payload["mtime"])
         if mtime != last_mtime:
@@ -1126,7 +1147,7 @@ def handle_local(
     if not isinstance(hostname, str):
         raise LauncherError("Local JSON must contain hostname.")
     try:
-        perform_local_handshake(hostname, port, cfg.handshake)
+        perform_local_handshake(hostname, port, cfg.handshake, trials=1)
         return existing
     except LauncherError:
         local_state.delete()
@@ -1169,7 +1190,9 @@ def create_local_file(
         if cfg.hostname and cfg.ssh_hostname and cfg.ssh_hostname != cfg.hostname:
             payload["ssh_hostname"] = cfg.ssh_hostname
     local_state.write(payload)
-    perform_local_handshake(payload["hostname"], payload["port"], cfg.handshake)
+    perform_local_handshake(
+        payload["hostname"], payload["port"], cfg.handshake, trials=5
+    )
     return payload
 
 
