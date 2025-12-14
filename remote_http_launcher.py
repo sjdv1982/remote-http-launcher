@@ -1154,21 +1154,43 @@ def handle_local(
         return None
 
 
+def _gather_tunnelable_parameters(parameters: Dict[str, Any]) -> Dict[str, int]:
+    result: Dict[str, int] = {}
+    for name, value in parameters.items():
+        if not isinstance(name, str) or (
+            not name.endswith("_port") and not name.endswith("-port")
+        ):
+            continue
+        if isinstance(value, bool):
+            continue
+        try:
+            port = int(value)
+        except (TypeError, ValueError):
+            continue
+        if port < 1 or port > 65535:
+            continue
+        result[name] = port
+    return result
+
+
 def create_local_file(
     cfg: Configuration,
     local_state: LocalState,
     remote_data: Dict[str, Any],
 ) -> Dict[str, Any]:
     port = int(remote_data["port"])
+    remote_pid = int(remote_data["pid"])
+    remote_parameters = remote_data.get("parameters")
+    parameters_payload: Dict[str, Any] | None = None
+    if isinstance(remote_parameters, dict):
+        parameters_payload = dict(remote_parameters)
     if cfg.tunnel:
         if cfg.hostname is None or cfg.ssh_hostname is None:
             raise LauncherError(
                 "SSH tunneling requires hostname and ssh_hostname to be configured."
             )
         local_port = allocate_local_port()
-        establish_tunnel(
-            cfg.ssh_hostname, cfg.hostname, port, local_port, int(remote_data["pid"])
-        )
+        establish_tunnel(cfg.ssh_hostname, cfg.hostname, port, local_port, remote_pid)
         payload: Dict[str, Any] = {
             "hostname": "localhost",
             "port": local_port,
@@ -1178,6 +1200,18 @@ def create_local_file(
                 "network_interface", cfg.network_interface
             ),
         }
+        tunnel_ports = _gather_tunnelable_parameters(remote_data)
+        for name, remote_param_port in tunnel_ports.items():
+            local_param_port = allocate_local_port()
+            establish_tunnel(
+                cfg.ssh_hostname,
+                cfg.hostname,
+                remote_param_port,
+                local_param_port,
+                remote_pid,
+            )
+            payload[name] = local_param_port
+            payload[f"tunneled-{name}"] = remote_param_port
     else:
         target_host = (
             cfg.hostname
@@ -1189,6 +1223,8 @@ def create_local_file(
         payload = {"hostname": target_host, "port": port}
         if cfg.hostname and cfg.ssh_hostname and cfg.ssh_hostname != cfg.hostname:
             payload["ssh_hostname"] = cfg.ssh_hostname
+    if parameters_payload is not None:
+        payload["parameters"] = parameters_payload
     local_state.write(payload)
     perform_local_handshake(
         payload["hostname"], payload["port"], cfg.handshake, trials=5
