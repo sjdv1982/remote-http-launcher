@@ -1228,7 +1228,7 @@ def handle_local(
         return None
 
 
-def _gather_tunnelable_parameters(parameters: Dict[str, Any]) -> Dict[str, int]:
+def _gather_port_parameters(parameters: Dict[str, Any]) -> Dict[str, int]:
     result: Dict[str, int] = {}
     for name, value in parameters.items():
         if not isinstance(name, str) or (
@@ -1274,7 +1274,7 @@ def create_local_file(
                 "network_interface", cfg.network_interface
             ),
         }
-        tunnel_ports = _gather_tunnelable_parameters(remote_data)
+        tunnel_ports = _gather_port_parameters(remote_data)
         for name, remote_param_port in tunnel_ports.items():
             local_param_port = allocate_local_port()
             establish_tunnel(
@@ -1287,6 +1287,7 @@ def create_local_file(
             payload[name] = local_param_port
             payload[f"tunneled-{name}"] = remote_param_port
     else:
+        port_parameters = _gather_port_parameters(remote_data)
         target_host = (
             cfg.hostname
             if cfg.hostname
@@ -1294,14 +1295,18 @@ def create_local_file(
         )
         if not isinstance(target_host, str) or not target_host:
             raise LauncherError("Unable to determine hostname for local connection.")
-        payload = {"hostname": target_host, "port": port}
+        payload = {"hostname": target_host}
+        payload.update(port_parameters)
         if cfg.hostname and cfg.ssh_hostname and cfg.ssh_hostname != cfg.hostname:
             payload["ssh_hostname"] = cfg.ssh_hostname
     if parameters_payload is not None:
         payload["parameters"] = parameters_payload
     local_state.write(payload)
+    port_name = "port"
+    if cfg.handshake is not None and cfg.handshake.port_name is not None:
+        port_name = cfg.handshake.port_name
     perform_local_handshake(
-        payload["hostname"], payload["port"], cfg.handshake, trials=5
+        payload["hostname"], payload[port_name], cfg.handshake, trials=5
     )
     return payload
 
