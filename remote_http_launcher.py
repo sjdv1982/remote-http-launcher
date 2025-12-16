@@ -73,6 +73,7 @@ def _configure_module_logger() -> None:
 class HandshakeConfig:
     path: str = ""
     parameters: Dict[str, str] = dataclasses.field(default_factory=dict)
+    port_name: str | None = None
 
 
 @dataclasses.dataclass
@@ -211,7 +212,12 @@ class Configuration:
                         "handshake parameters must map strings to simple values."
                     )
                 normalized[key] = str(val)
-            return HandshakeConfig(path=path_value, parameters=normalized)
+            port_name = value.get("port_name")
+            if port_name is not None and not isinstance(port_name, str):
+                raise LauncherError("handshake.port_name must be a string.")
+            return HandshakeConfig(
+                path=path_value, parameters=normalized, port_name=port_name
+            )
         raise LauncherError(
             "handshake must be a string path or a mapping with path and parameters."
         )
@@ -262,13 +268,14 @@ class LocalState:
     def read(self) -> Optional[Dict[str, Any]]:
         if not self.json_path.exists():
             return None
-        with self.json_path.open("r", encoding="utf-8") as handle:
-            try:
-                return json.load(handle)
-            except json.JSONDecodeError as exc:
-                raise LauncherError(
-                    f"Malformed local connection file: {self.json_path}"
-                ) from exc
+        try:
+            with self.json_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except json.JSONDecodeError as exc:
+            raise LauncherError(
+                f"Malformed local connection file: {self.json_path}"
+            ) from exc
+        return data
 
     def write(self, payload: Dict[str, Any]) -> None:
         tmp_path = self.json_path.with_suffix(".tmp")
@@ -489,11 +496,19 @@ class RemoteState:
         return os.path.join(self.remote_dir, REMOTE_LOG_NAME.format(key=self.cfg.key))
 
     def exists(self) -> bool:
+
         script = (
             "import pathlib\n"
             f"path = pathlib.Path({self.json_path!r}).expanduser()\n"
-            "import sys\n"
-            "sys.exit(0 if path.exists() else 1)\n"
+            "import sys, os, json\n"
+            "if not path.exists():\n"
+            "    sys.exit(1)\n"
+            "with path.open('r', encoding='utf-8') as handle:\n"
+            "    data = json.load(handle)\n"
+            "if isinstance(data, dict) and data.get('dry_run'):\n"
+            "    os.remove(path)\n"
+            "    sys.exit(1)\n"
+            "sys.exit(0)\n"
         )
         result = self.executor.run_python(
             script, check=False, conda=bool(self.cfg.conda_env), silent=True
@@ -570,7 +585,7 @@ class RemoteState:
             return None
         return stdout
 
-    def launch_process(self, conda_base: Optional[str]) -> None:
+    def evaluate_command(self) -> str:
         command_template = self.cfg.command_template
         namespace = self.cfg.namespace.copy()
         namespace["status_file"] = self.json_path
@@ -579,7 +594,10 @@ class RemoteState:
             raise LauncherError("The evaluated command must be a string.")
         if not evaluated_command.strip() or "\n" in evaluated_command:
             raise LauncherError("The command must be a plausible bash command.")
+        return evaluated_command
 
+    def launch_process(self, conda_base: Optional[str]) -> None:
+        evaluated_command = self.evaluate_command()
         command = evaluated_command
         parameters_literal = (
             json.dumps(self.cfg.file_parameters)
@@ -642,7 +660,32 @@ class RemoteState:
             .replace("{network!r}", repr(self.cfg.network_interface))
             .replace("{parameters_literal!r}", repr(parameters_literal))
         )
-        p = self.executor.run_python(script, conda=bool(self.cfg.conda_env))
+        self.executor.run_python(script, conda=bool(self.cfg.conda_env))
+
+    def write_dry_run_metadata(self, evaluated_command: str) -> None:
+        remote_dir = pathlib.Path(self.remote_dir).expanduser()
+        remote_dir.mkdir(parents=True, exist_ok=True)
+        json_path = pathlib.Path(self.json_path).expanduser()
+        log_path = pathlib.Path(self.log_path).expanduser()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        if not log_path.exists():
+            log_path.touch()
+        parameters_literal = (
+            json.dumps(self.cfg.file_parameters)
+            if self.cfg.file_parameters is not None
+            else "null"
+        )
+        parameters = json.loads(parameters_literal)
+        data = {
+            "workdir": self.cfg.workdir,
+            "log": log_path.as_posix(),
+            "command": evaluated_command,
+            "network_interface": self.cfg.network_interface,
+            "parameters": parameters,
+            "dry_run": True,
+        }
+        with json_path.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle)
 
     def verify_port_in_use(self, host: str, port: int) -> None:
         script = (
@@ -766,6 +809,7 @@ def perform_local_handshake(
                 status = getattr(response, "status", 200)
                 if not (200 <= status < 300):
                     raise LauncherError(f"Handshake failed with HTTP status {status}.")
+            break
         except urllib.error.URLError as exc:
             if trial < trials - 1:
                 time.sleep(3)
@@ -1023,7 +1067,9 @@ def _conda_env_exists(executor: Executor, env: str) -> bool:
     return any(path.endswith(f"{os.sep}{env}") for path in envs)
 
 
-def handle_remote(cfg: Configuration, remote: RemoteState) -> Dict[str, Any]:
+def handle_remote(
+    cfg: Configuration, remote: RemoteState, *, dry_run: bool = False
+) -> Dict[str, Any]:
     attempted_launch = False
     while True:
         if remote.exists():
@@ -1041,17 +1087,25 @@ def handle_remote(cfg: Configuration, remote: RemoteState) -> Dict[str, Any]:
                     remote.remove()
                     continue
 
-                for trial in range(5):
-                    try:
-                        remote.handshake(target_host, data["port"], cfg.handshake)
-                    except Exception as exc:
-                        if trial < 4:
-                            time.sleep(3)
+                if cfg.handshake is not None:
+                    ntrials = 15
+                    for trial in range(ntrials):
+                        port_name = cfg.handshake.port_name
+                        if port_name is not None:
+                            handshake_port = data[port_name]
+                        else:
+                            handshake_port = data["port"]
+                        try:
+                            remote.handshake(target_host, handshake_port, cfg.handshake)
+                            break
+                        except Exception as exc:
+                            if trial < ntrials - 1:
+                                time.sleep(1)
+                                continue
+                            traceback.print_exc()
+                            remote.kill_process(pid)
+                            remote.remove()
                             continue
-                        traceback.print_exc()
-                        remote.kill_process(pid)
-                        remote.remove()
-                        continue
 
                 return data
             if status == "starting" and isinstance(data.get("pid"), int):
@@ -1078,7 +1132,7 @@ def handle_remote(cfg: Configuration, remote: RemoteState) -> Dict[str, Any]:
         if attempted_launch:
             raise LauncherError("Remote launch already attempted and failed.")
         conda_base = None
-        if cfg.conda_env:
+        if cfg.conda_env and not dry_run:
             conda_base = _fetch_conda_base(remote.executor)
             if not conda_base:
                 raise LauncherError(
@@ -1088,6 +1142,11 @@ def handle_remote(cfg: Configuration, remote: RemoteState) -> Dict[str, Any]:
                 raise LauncherError(
                     f"Remote conda environment '{cfg.conda_env}' does not exist."
                 )
+        if dry_run:
+            evaluated_command = remote.evaluate_command()
+            remote.write_dry_run_metadata(evaluated_command)
+            print(evaluated_command)
+            raise SystemExit(0)
         remote.launch_process(conda_base)
         attempted_launch = True
         for _ in range(10):
@@ -1104,22 +1163,31 @@ def monitor_remote_start(
     last_change = time.time()
     pid = int(initial["pid"])
     while True:
-        time.sleep(5.0)
+        time.sleep(1.0)
         payload = remote.stat_and_read()
         data = payload["data"]
         status = data.get("status")
+        if status == "failed":
+            return None
         if status == "running":
             validate_remote_running_state(data)
             target_host = data.get("network_interface", cfg.network_interface)
             remote.verify_port_in_use(target_host, data["port"])
-            for trial in range(3):
-                try:
-                    remote.handshake(target_host, data["port"], cfg.handshake)
-                except Exception as exc:
-                    if trial < 2:
-                        time.sleep(2)
-                        continue
-                    raise exc from None
+            if cfg.handshake is not None:
+                port_name = cfg.handshake.port_name
+                if port_name is not None:
+                    handshake_port = data[port_name]
+                else:
+                    handshake_port = data["port"]
+                for trial in range(6):
+                    try:
+                        remote.handshake(target_host, handshake_port, cfg.handshake)
+                        break
+                    except Exception as exc:
+                        if trial < 5:
+                            time.sleep(1)
+                            continue
+                        raise exc from None
             return data
         mtime = float(payload["mtime"])
         if mtime != last_mtime:
@@ -1140,9 +1208,15 @@ def handle_local(
     existing = local_state.read()
     if existing is None:
         return None
-    port = existing.get("port")
+    if cfg.handshake is None:
+        return existing
+
+    port_name = cfg.handshake.port_name
+    if port_name is None:
+        port_name = "port"
+    port = existing.get(port_name)
     if not isinstance(port, int):
-        raise LauncherError("Local JSON must contain integer port.")
+        raise LauncherError(f"Local JSON must contain integer {port_name}.")
     hostname = existing.get("hostname")
     if not isinstance(hostname, str):
         raise LauncherError("Local JSON must contain hostname.")
@@ -1233,7 +1307,10 @@ def create_local_file(
 
 
 def _execute(
-    cfg: Configuration, connection_dir: Optional[pathlib.Path]
+    cfg: Configuration,
+    connection_dir: Optional[pathlib.Path],
+    *,
+    dry_run: bool = False,
 ) -> Dict[str, Any]:
     local_state = LocalState.build(cfg, connection_dir)
 
@@ -1254,7 +1331,9 @@ def _execute(
     else:
         executor = LocalExecutor()
     remote = RemoteState(executor, cfg, remote_dir.as_posix())
-    remote_result = handle_remote(cfg, remote)
+    if dry_run and cfg.hostname is not None:
+        raise LauncherError("--dry-run requires hostname to be unset in the config.")
+    remote_result = handle_remote(cfg, remote, dry_run=dry_run)
 
     return create_local_file(cfg, local_state, remote_result)
 
@@ -1293,10 +1372,15 @@ def main(argv: list[str] | None = None) -> int:
         type=pathlib.Path,
         help="Override the connection directory. Defaults to ~/.remote-http-launcher/client",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the evaluated remote command without launching it.",
+    )
     args = parser.parse_args(argv)
 
     cfg = Configuration.from_yaml(args.config)
-    _execute(cfg, args.connection_dir)
+    _execute(cfg, args.connection_dir, dry_run=args.dry_run)
     return 0
 
 
