@@ -1295,7 +1295,7 @@ def create_local_file(
         )
         if not isinstance(target_host, str) or not target_host:
             raise LauncherError("Unable to determine hostname for local connection.")
-        payload = {"hostname": target_host}
+        payload = {"hostname": target_host, "port": port}
         payload.update(port_parameters)
         if cfg.hostname and cfg.ssh_hostname and cfg.ssh_hostname != cfg.hostname:
             payload["ssh_hostname"] = cfg.ssh_hostname
