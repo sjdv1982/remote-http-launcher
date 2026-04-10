@@ -196,10 +196,17 @@ class MinimalObserver:
         self._start = clock()
         self._rendered = False
         self._index = {phase: idx for idx, phase in enumerate(expected)}
+        self._max_seen_index = -1
+        self._max_seen_phase: Phase | None = None
         isatty = getattr(stream, "isatty", None)
         self._tty = bool(isatty and isatty())
 
     def on_phase(self, phase: Phase, result: str) -> None:
+        if phase is not Phase.DONE:
+            current_index = self._index.get(phase, len(self.expected) - 1)
+            if current_index >= self._max_seen_index:
+                self._max_seen_index = current_index
+                self._max_seen_phase = phase
         elapsed = self._clock() - self._start
         if not self._rendered:
             if phase is Phase.DONE and elapsed < self._threshold:
@@ -210,7 +217,11 @@ class MinimalObserver:
         if phase is Phase.DONE:
             self._finish(elapsed)
             return
-        self._render(phase)
+        if self._max_seen_phase is None:
+            return
+        if phase is not self._max_seen_phase:
+            return
+        self._render(self._max_seen_phase)
 
     def on_detail(self, message: str) -> None:
         return

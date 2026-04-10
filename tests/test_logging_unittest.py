@@ -215,6 +215,33 @@ class LoggingObserverTests(unittest.TestCase):
         observer.on_phase(rhl.Phase.DONE, "launched")
         self.assertIn("svc: ready (2.0s)", stream.getvalue())
 
+    def test_minimal_observer_does_not_regress_on_retry_phase(self):
+        stream = io.StringIO()
+        clock = FakeClock()
+        observer = rhl.MinimalObserver(
+            "svc",
+            [
+                rhl.Phase.LOCAL_CHECK,
+                rhl.Phase.CONNECT,
+                rhl.Phase.REMOTE_CHECK,
+                rhl.Phase.REMOTE_VALIDATE,
+                rhl.Phase.STALE_CLEANUP,
+                rhl.Phase.CONDA_SETUP,
+                rhl.Phase.LAUNCH,
+                rhl.Phase.WAIT_FOR_START,
+                rhl.Phase.DONE,
+            ],
+            stream=stream,
+            clock=clock,
+        )
+        clock.now = 2.0
+        observer.on_phase(rhl.Phase.STALE_CLEANUP, "kill+remove")
+        first_line = stream.getvalue().strip().splitlines()[-1]
+        observer.on_phase(rhl.Phase.REMOTE_CHECK, "missing")
+        lines = stream.getvalue().strip().splitlines()
+        self.assertEqual(lines[-1], first_line)
+        self.assertIn("stale_cleanup", lines[-1])
+
     def test_debug_observer_emits_full_command_and_script(self):
         stream = io.StringIO()
         observer = rhl.DebugObserver(stream)
