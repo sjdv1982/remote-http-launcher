@@ -135,11 +135,26 @@ class CompositeObserver:
 
 
 class BasicObserver:
-    def __init__(self, stream: TextIO):
+    def __init__(
+        self,
+        stream: TextIO,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ):
         self.stream = stream
+        self._clock = clock
+        self._start = clock()
+
+    def _prefix(self) -> str:
+        elapsed = self._clock() - self._start
+        return f"{elapsed:6.1f}s"
 
     def on_phase(self, phase: Phase, result: str) -> None:
-        print(f"{phase.value}: {result}", file=self.stream, flush=True)
+        print(
+            f"{self._prefix()} {phase.value}: {result}",
+            file=self.stream,
+            flush=True,
+        )
 
     def on_detail(self, message: str) -> None:
         return
@@ -154,7 +169,7 @@ class BasicObserver:
         return
 
     def on_error(self, message: str) -> None:
-        print(f"error: {message}", file=self.stream, flush=True)
+        print(f"{self._prefix()} error: {message}", file=self.stream, flush=True)
 
 
 class DebugObserver(BasicObserver):

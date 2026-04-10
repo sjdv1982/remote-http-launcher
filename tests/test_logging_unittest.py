@@ -155,12 +155,14 @@ class LoggingObserverTests(unittest.TestCase):
 
     def test_basic_observer_formats_phase_and_error_lines(self):
         stream = io.StringIO()
-        observer = rhl.BasicObserver(stream)
+        clock = FakeClock()
+        observer = rhl.BasicObserver(stream, clock=clock)
         observer.on_phase(rhl.Phase.LOCAL_CHECK, "missing")
+        clock.now = 1.2
         observer.on_error("boom")
         self.assertEqual(
             stream.getvalue().splitlines(),
-            ["local_check: missing", "error: boom"],
+            ["   0.0s local_check: missing", "   1.2s error: boom"],
         )
 
     def test_minimal_observer_fast_path_is_silent(self):
