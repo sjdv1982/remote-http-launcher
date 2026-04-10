@@ -257,6 +257,14 @@ class LoggingObserverTests(unittest.TestCase):
         self.assertIn("print('hi')", output)
         self.assertIn("command-done[host]: short", output)
 
+    def test_open_log_stream_truncates_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "launcher.log"
+            path.write_text("old contents\n", encoding="utf-8")
+            with rhl._open_log_stream(str(path)) as handle:
+                handle.write("new contents\n")
+            self.assertEqual(path.read_text(encoding="utf-8"), "new contents\n")
+
 
 class LauncherFlowTests(unittest.TestCase):
     def test_run_strips_logging_keys_before_configuration(self):

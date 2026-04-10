@@ -319,7 +319,7 @@ def _build_expected_phases(cfg: "Configuration") -> list[Phase]:
 def _open_log_stream(path: str) -> TextIO:
     log_path = pathlib.Path(path).expanduser()
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    return log_path.open("a", encoding="utf-8", buffering=1)
+    return log_path.open("w", encoding="utf-8", buffering=1)
 
 
 def _build_observer_bundle(
