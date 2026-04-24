@@ -111,8 +111,65 @@ result = run({
 print(result["hostname"], result["port"])
 ```
 
+## SSH Guard
+
+`remote-http-launcher` ships an SSH guard (`rhl-guard`) that restricts what commands can be run on the remote server under the service user account. When installed, only the specific command patterns sent by the launcher itself and a set of named helper programs are permitted — naked shell commands such as `pkill`, `rm -rf`, or arbitrary `python3 -c` are rejected.
+
+### How it works
+
+The SSH `command=` option in `authorized_keys` forces every incoming SSH session through `rhl-guard`. The guard reads `SSH_ORIGINAL_COMMAND`, validates it against a whitelist, and either `exec`s the command or exits with an error. Interactive sessions (no `SSH_ORIGINAL_COMMAND`) are always rejected.
+
+The whitelist covers:
+
+- `bash -lc` commands matching the exact patterns that `remote-http-launcher` generates: `ps -p <int> -o pid=`, `kill -1 <int>`, and Python heredoc scripts bearing the launcher's `__RHL_REMOTE_SCRIPT__` sentinel.
+- Inside Python heredoc launch scripts, the guard verifies that the service binary is one of the tools listed in `ssh_guard/tools.yaml` (a vendored copy of the Seamless `tools.yaml`).
+- Any `rhl-*` helper command installed by this package (see below).
+- Conda probe fallbacks (`command -v conda`, `cat ~/.bashrc`, etc.) — only reached on servers where the conda cache has not been primed.
+
+### Installation
+
+On the remote server, add to `~/.ssh/authorized_keys`:
+
+```
+command="rhl-guard" ssh-rsa AAAA... your-key-comment
+```
+
+If you use a non-standard tools.yaml, set `RHL_TOOLS_YAML=/path/to/tools.yaml` in the server environment.
+
+### Conda cache (guarded servers)
+
+When the guard is active, the launcher replaces the individual conda probe SSH commands with a single cached read. Prime the cache once after installing the guard:
+
+```bash
+ssh <remote_host> rhl-cache-conda
+```
+
+Re-run this if the conda environment changes. On unguarded servers the launcher falls back to its original probe behavior automatically — `rhl-cache-conda` is a no-op there too.
+
+## Helper commands (`rhl-*`)
+
+Installing `remote-http-launcher` adds a set of server-side helper programs that perform specific, safe operations on launcher state. These are the commands agents and operators should use instead of raw `kill`, `rm`, or shell loops.
+
+| Command | Description |
+|---------|-------------|
+| `rhl-guard` | SSH guard entry point — validates `SSH_ORIGINAL_COMMAND` before exec |
+| `rhl-cache-conda` | Discover conda setup and write `~/.remote-http-launcher/conda-setup.json` |
+| `rhl-cat-log <key>` | Print the stdout/stderr log for a service |
+| `rhl-cat-json <key>` | Pretty-print the server state JSON (PID, port, status, workdir) |
+| `rhl-ls-services [--client]` | List service keys (server-side by default, `--client` for local) |
+| `rhl-kill-service <key>` | Send SIGHUP to the service PID and remove its server state JSON |
+| `rhl-rm-state <key> [--client] [--server]` | Remove state JSON files (default: both) |
+| `rhl-restart-cluster <cluster>` | SIGHUP all services for a cluster and clean up their state files |
+| `rhl-clear-buffer <path>` | Remove all files directly inside a buffer directory |
+| `rhl-clear-db <path>` | Remove `seamless.db` from a database directory |
+
+`rhl-clear-buffer` and `rhl-clear-db` validate that the target path is absolute and not a system directory before touching anything.
+
+All state-file helpers respect the `REMOTE_HTTP_LAUNCHER_DIR` environment variable (same as the launcher).
+
 ## CLI scripts
 
 Installing `remote-http-launcher` also provides:
 
-- `remote-http-launcher`
+- `remote-http-launcher` — main launcher CLI
+- All `rhl-*` helpers listed in the table above

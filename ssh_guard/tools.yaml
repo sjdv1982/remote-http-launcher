@@ -1,0 +1,93 @@
+hashserver:
+  ADDED: [hostname, network_interface, conda, port_start, port_end, tunnel]
+  INJECTED: [CLUSTER, BUFFERDIR, PROJECTSUBDIR, STAGEDIR, MODE]
+  log_level: minimal
+  log_file_template: "~/.remote-http-launcher/logs/$CLUSTER$PROJECTSUBDIR$STAGEDIR/hashserver.log"
+  debug_log_file_template: "~/.remote-http-launcher/logs/$CLUSTER$PROJECTSUBDIR$STAGEDIR/hashserver.debug.log"
+  timeout: 600
+  workdir_template: "$BUFFERDIR$PROJECTSUBDIR$STAGEDIR"
+  key_template: 'hashserver-$CLUSTER-$MODE-{"$PROJECTSUBDIR$STAGEDIR".strip("/").replace("/", "--")}'
+  command_template: "hashserver{' --port-range {} {}'.format(config.get('port_start'), config.get('port_end')) if config.get('port_start') is not None and config.get('port_end') is not None else ''} --status-file {status_file}{' --host ' + config.get('network_interface') if config.get('network_interface') is not None else ''} --timeout {timeout} {workdir}{' --writable' if '$MODE' == 'rw' else ''}"
+  handshake: healthcheck
+
+database:
+  ADDED: [hostname, network_interface, conda, port_start, port_end, tunnel]
+  INJECTED: [CLUSTER, DATABASE_DIR, PROJECTSUBDIR, STAGEDIR, MODE]
+  log_level: minimal
+  log_file_template: "~/.remote-http-launcher/logs/$CLUSTER$PROJECTSUBDIR$STAGEDIR/database.log"
+  debug_log_file_template: "~/.remote-http-launcher/logs/$CLUSTER$PROJECTSUBDIR$STAGEDIR/database.debug.log"
+  timeout: 600
+  workdir_template: "$DATABASE_DIR$PROJECTSUBDIR$STAGEDIR"
+  key_template: 'database-$CLUSTER-$MODE-{"$PROJECTSUBDIR$STAGEDIR".strip("/").replace("/", "--")}'
+  command_template: "seamless-database{' --port-range {} {}'.format(config.get('port_start'), config.get('port_end')) if config.get('port_start') is not None and config.get('port_end') is not None else ''} --status-file {status_file}{' --host ' + config.get('network_interface') if config.get('network_interface') is not None else ''} --timeout {timeout}{' --writable' if '$MODE' == 'rw' else ''} {workdir}/seamless.db"
+  handshake: healthcheck
+
+jobserver:
+  ADDED:
+    [
+      workers,
+      hostname,
+      network_interface,
+      conda,
+      port_start,
+      port_end,
+      tunnel,
+      file_parameters,
+    ]
+  INJECTED: [CLUSTER, PROJECTSUBDIR, STAGESUBDIR]
+  log_level: minimal
+  log_file_template: "~/.remote-http-launcher/logs/$CLUSTER$PROJECTSUBDIR$STAGESUBDIR/jobserver.log"
+  debug_log_file_template: "~/.remote-http-launcher/logs/$CLUSTER$PROJECTSUBDIR$STAGESUBDIR/jobserver.debug.log"
+  timeout: 600
+  workdir_template: "/tmp"
+  key_template: 'jobserver-$CLUSTER-$MODE-{"$PROJECTSUBDIR$STAGESUBDIR".strip("/").replace("/", "--")}'
+  command_template: "seamless-jobserver --workers {workers} --port-range {port_start} {port_end} --status-file {status_file} --host {config['network_interface']} --timeout {timeout}"
+  handshake: healthcheck
+
+daskserver:
+  ADDED:
+    [
+      cluster_string,
+      hostname,
+      network_interface,
+      conda,
+      port_start,
+      port_end,
+      tunnel,
+      file_parameters,
+    ]
+  INJECTED: [CLUSTER, PROJECTSUBDIR, STAGESUBDIR]
+  log_level: minimal
+  log_file_template: "~/.remote-http-launcher/logs/$CLUSTER$PROJECTSUBDIR$STAGESUBDIR/daskserver.log"
+  debug_log_file_template: "~/.remote-http-launcher/logs/$CLUSTER$PROJECTSUBDIR$STAGESUBDIR/daskserver.debug.log"
+  timeout: 600
+  workdir_template: "/tmp"
+  key_template: 'daskserver-$CLUSTER-$MODE-{"$PROJECTSUBDIR$STAGESUBDIR".strip("/").replace("/", "--")}'
+  command_template: "seamless-dask-wrapper {cluster_string} --port-range {port_start} {port_end} --status-file {status_file} --host {config['network_interface']} --timeout {timeout}"
+  handshake:
+    path: health
+    port_name: dashboard_port
+
+pure_daskserver:
+  ADDED:
+    [
+      cluster_string,
+      hostname,
+      network_interface,
+      conda,
+      port_start,
+      port_end,
+      tunnel,
+      file_parameters,
+    ]
+  INJECTED: [CLUSTER, QUEUE]
+  log_level: minimal
+  log_file_template: "~/.remote-http-launcher/logs/$CLUSTER/pure-daskserver-$QUEUE.log"
+  debug_log_file_template: "~/.remote-http-launcher/logs/$CLUSTER/pure-daskserver-$QUEUE.debug.log"
+  timeout: 600
+  workdir_template: "/tmp"
+  key_template: "pure-daskserver-$CLUSTER-$QUEUE"
+  command_template: "seamless-dask-wrapper {cluster_string} --port-range {port_start} {port_end} --status-file {status_file} --host {config['network_interface']} --timeout {timeout}"
+  handshake:
+    path: health
+    port_name: dashboard_port

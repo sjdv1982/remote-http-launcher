@@ -29,7 +29,20 @@ classifiers = [
 Repository = "https://github.com/sjdv1982/remote-http-launcher"
 
 [project.scripts]
-remote-http-launcher = "remote_http_launcher:main"
+remote-http-launcher  = "remote_http_launcher:main"
+rhl-guard             = "ssh_guard.guard:main"
+rhl-cache-conda       = "ssh_guard.helpers.cache_conda:main"
+rhl-kill-service      = "ssh_guard.helpers.kill_service:main"
+rhl-rm-state          = "ssh_guard.helpers.rm_state:main"
+rhl-cat-log           = "ssh_guard.helpers.cat_log:main"
+rhl-cat-json          = "ssh_guard.helpers.cat_json:main"
+rhl-ls-services       = "ssh_guard.helpers.ls_services:main"
+rhl-restart-cluster   = "ssh_guard.helpers.restart_cluster:main"
+rhl-clear-buffer      = "ssh_guard.helpers.clear_buffer:main"
+rhl-clear-db          = "ssh_guard.helpers.clear_db:main"
 
-[tool.setuptools]
-py-modules = ["remote_http_launcher"]
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools.package-data]
+ssh_guard = ["tools.yaml"]

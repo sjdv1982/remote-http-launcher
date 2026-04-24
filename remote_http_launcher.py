@@ -647,6 +647,30 @@ class Executor:
         self._conda_checked = False
         self._conda_source: Optional[str] = None
         self._conda_unavailable = False
+        self._conda_cache: Optional[Dict[str, Any]] = None
+
+    def _read_conda_cache(self) -> Optional[Dict[str, Any]]:
+        """Read ~/.remote-http-launcher/conda-setup.json via a Python heredoc.
+
+        Returns the parsed dict or None on cache miss or parse error.
+        """
+        cache_env = "REMOTE_HTTP_LAUNCHER_DIR"
+        script = (
+            "import json, pathlib, sys, os\n"
+            f"base = pathlib.Path(os.environ.get({cache_env!r},"
+            " '~/.remote-http-launcher')).expanduser()\n"
+            "cache_path = base / 'conda-setup.json'\n"
+            "if not cache_path.exists():\n"
+            "    sys.exit(1)\n"
+            "print(json.dumps(json.loads(cache_path.read_text('utf-8'))))\n"
+        )
+        result = self.run_python(script, check=False, conda=False)
+        if result.returncode != 0:
+            return None
+        try:
+            return json.loads(result.stdout.strip())
+        except (json.JSONDecodeError, ValueError):
+            return None
 
     def run_shell(
         self, command: str, *, check: bool = True, conda: bool = False
@@ -679,6 +703,22 @@ class Executor:
             )
         if self._conda_checked:
             return self._conda_source
+
+        # Step 1: try the conda-setup.json cache
+        cache = self._read_conda_cache()
+        if cache is None:
+            # Step 2: prime cache via rhl-cache-conda (whitelisted helper)
+            self.observer.on_detail(f"{self.host} conda cache miss, running rhl-cache-conda")
+            self.run_shell("rhl-cache-conda", check=False, conda=False)
+            cache = self._read_conda_cache()
+        if cache is not None:
+            self._conda_cache = cache
+            self._conda_source = cache.get("conda_source")
+            self._conda_checked = True
+            self.observer.on_detail(f"{self.host} conda setup loaded from cache")
+            return self._conda_source
+
+        # Step 3: fallback — original probe commands (no guard installed)
         self._conda_checked = True
         self.observer.on_detail(f"{self.host} probing for conda on PATH")
         probe = self._run_bash("command -v conda >/dev/null 2>&1")
@@ -1369,6 +1409,8 @@ def establish_tunnel(
 
 
 def _fetch_conda_base(executor: Executor) -> Optional[str]:
+    if executor._conda_cache is not None:
+        return executor._conda_cache.get("conda_base") or None
     try:
         base_result = executor.run_shell("conda info --base", check=False, conda=True)
     except LauncherError:
@@ -1382,6 +1424,9 @@ def _fetch_conda_base(executor: Executor) -> Optional[str]:
 
 
 def _conda_env_exists(executor: Executor, env: str) -> bool:
+    if executor._conda_cache is not None:
+        envs = executor._conda_cache.get("envs", [])
+        return any(path.endswith(f"{os.sep}{env}") for path in envs)
     result = executor.run_shell("conda env list --json", check=True, conda=True)
     try:
         payload = json.loads(result.stdout)
