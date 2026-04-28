@@ -121,10 +121,13 @@ The SSH `command=` option in `authorized_keys` forces every incoming SSH session
 
 The whitelist covers:
 
-- `bash -lc` commands matching the exact patterns that `remote-http-launcher` generates: `ps -p <int> -o pid=`, `kill -1 <int>`, and Python heredoc scripts bearing the launcher's `__RHL_REMOTE_SCRIPT__` sentinel.
+- `bash -lc` commands matching the exact patterns that `remote-http-launcher` generates: `ps -p <int> -o pid=` and Python heredoc scripts bearing the launcher's `__RHL_REMOTE_SCRIPT__` sentinel.
 - Inside Python heredoc launch scripts, the guard verifies that the service binary is one of the tools listed in `ssh_guard/tools.yaml` (a vendored copy of the Seamless `tools.yaml`).
 - Any `rhl-*` helper command installed by this package (see below).
 - Conda probe fallbacks (`command -v conda`, `cat ~/.bashrc`, etc.) — only reached on servers where the conda cache has not been primed.
+
+Direct process-management commands such as `kill -1 <pid>` are rejected by
+the guard. Use helpers such as `rhl-kill-service <key>` instead.
 
 ### Installation
 

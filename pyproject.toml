@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "remote-http-launcher"
-version = "0.2.0"
+version = "0.3.0"
 description = "Launch, supervise, and reconnect to long-running HTTP services locally or over SSH, with optional tunneling."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,8 +41,12 @@ rhl-restart-cluster   = "ssh_guard.helpers.restart_cluster:main"
 rhl-clear-buffer      = "ssh_guard.helpers.clear_buffer:main"
 rhl-clear-db          = "ssh_guard.helpers.clear_db:main"
 
+[tool.setuptools]
+py-modules = ["remote_http_launcher"]
+
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["ssh_guard*"]
 
 [tool.setuptools.package-data]
 ssh_guard = ["tools.yaml"]

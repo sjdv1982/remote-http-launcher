@@ -14,6 +14,7 @@ binary names that are allowed inside Python heredoc launch scripts.
 
 import importlib.resources
 import os
+import pathlib
 import re
 import shlex
 import sys
@@ -73,7 +74,6 @@ _INNER_PATTERNS = [
     re.compile(r"^conda env list --json$"),
     # process management
     re.compile(r"^ps -p \d+ -o pid=$"),
-    re.compile(r"^kill -1 \d+$"),
     # Python heredoc (launcher scripts)
     re.compile(r"^python3 - <<'__RHL_REMOTE_SCRIPT__'"),
 ]
@@ -179,6 +179,13 @@ def main() -> None:
     except ValueError as exc:
         print(f"rhl-guard: parse error: {exc}", file=sys.stderr)
         sys.exit(1)
+
+    if re.match(r"^rhl-[a-z][a-z-]*$", args[0]):
+        argv0 = pathlib.Path(sys.argv[0])
+        if argv0.is_absolute():
+            sibling = argv0.with_name(args[0])
+            if sibling.exists():
+                os.execv(sibling.as_posix(), args)
 
     os.execvp(args[0], args)
     # execvp only returns on error

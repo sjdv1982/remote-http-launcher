@@ -806,6 +806,22 @@ class SSHExecutor(Executor):
         result = self.run_shell(f"ps -p {pid} -o pid=", check=False)
         return result.returncode == 0 and result.stdout.strip() != ""
 
+    def kill_service(self, key: str, pid: int) -> bool:
+        result = subprocess.run(
+            ["ssh", self._host, "rhl-kill-service", key],
+            text=True,
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            return True
+        # Older remote-http-launcher installs may not have the helper yet.
+        if "not found" not in result.stderr and "No such file" not in result.stderr:
+            raise LauncherError(
+                f"{self.host} command failed: rhl-kill-service {key}\n"
+                f"{result.stderr.strip()}"
+            )
+        return False
+
 
 class LocalExecutor(Executor):
     def __init__(self, observer: LauncherObserver):
@@ -840,6 +856,9 @@ class LocalExecutor(Executor):
             capture_output=True,
         )
         return result.returncode == 0 and result.stdout.strip() != ""
+
+    def kill_service(self, key: str, pid: int) -> bool:
+        return False
 
 
 @dataclasses.dataclass
@@ -879,6 +898,8 @@ class RemoteState:
         return result.returncode == 0
 
     def kill_process(self, pid) -> None:
+        if self.executor.kill_service(self.cfg.key, int(pid)):
+            return
         script = f"kill -1 {pid}"
         self.executor.run_shell(script, check=False, conda=False)
 
