@@ -1575,7 +1575,6 @@ def handle_remote(
                     )
                 continue
             _cleanup_remote_state(remote, result="remove")
-            attempted_launch = True
             continue
         remote.observer.on_phase(Phase.REMOTE_CHECK, "missing")
         if attempted_launch:
@@ -1700,6 +1699,10 @@ def handle_local(
         raise
     if existing is None:
         observer.on_phase(Phase.LOCAL_CHECK, "missing")
+        return None
+    if existing.get("status") == "stale":
+        local_state.delete()
+        observer.on_phase(Phase.LOCAL_CHECK, "stale")
         return None
     if cfg.handshake is None:
         observer.on_phase(Phase.LOCAL_CHECK, "reused")
