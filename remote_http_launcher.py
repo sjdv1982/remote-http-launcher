@@ -435,6 +435,7 @@ class Configuration:
     file_parameters: Dict[str, Any] | None
     tunnel: bool
     conda_env: Optional[str]
+    meta: Dict[str, Any] | None
     namespace: Dict[str, Any]
     raw: Dict[str, Any]
 
@@ -522,6 +523,10 @@ class Configuration:
         if conda_env is not None and not isinstance(conda_env, str):
             raise LauncherError("The conda field, when present, must be a string.")
 
+        meta = Configuration._parse_meta(data.get("meta"))
+        if meta is not None:
+            namespace["meta"] = meta
+
         return Configuration(
             workdir=workdir,
             hostname=hostname,
@@ -533,6 +538,7 @@ class Configuration:
             file_parameters=file_parameters,
             tunnel=tunnel,
             conda_env=conda_env,
+            meta=meta,
             namespace=namespace,
             raw=data,
         )
@@ -580,6 +586,18 @@ class Configuration:
                 "file_parameters must contain JSON-serializable values."
             ) from exc
         return value
+
+    @staticmethod
+    def _parse_meta(value: Any) -> Dict[str, Any] | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise LauncherError("meta must be a mapping when provided.")
+        try:
+            json.dumps(value)
+        except TypeError as exc:
+            raise LauncherError("meta must contain JSON-serializable values.") from exc
+        return dict(value)
 
     @staticmethod
     def _require_string(data: Dict[str, Any], key: str) -> str:
@@ -808,19 +826,16 @@ class SSHExecutor(Executor):
 
     def kill_service(self, key: str, pid: int) -> bool:
         result = subprocess.run(
-            ["ssh", self._host, "rhl-kill-service", key],
+            ["ssh", self._host, "rhl-stop", key],
             text=True,
             capture_output=True,
         )
         if result.returncode == 0:
             return True
-        # Older remote-http-launcher installs may not have the helper yet.
-        if "not found" not in result.stderr and "No such file" not in result.stderr:
-            raise LauncherError(
-                f"{self.host} command failed: rhl-kill-service {key}\n"
-                f"{result.stderr.strip()}"
-            )
-        return False
+        raise LauncherError(
+            f"{self.host} command failed: rhl-stop {key}\n"
+            f"{result.stderr.strip()}"
+        )
 
 
 class LocalExecutor(Executor):
@@ -980,6 +995,7 @@ class RemoteState:
             if self.cfg.file_parameters is not None
             else "null"
         )
+        meta_literal = json.dumps(self.cfg.meta) if self.cfg.meta is not None else "null"
         if self.cfg.conda_env:
             if not conda_base:
                 raise LauncherError(
@@ -1029,12 +1045,16 @@ class RemoteState:
                 "parameters = json.loads({parameters_literal!r})\n"
                 "if parameters is not None:\n"
                 "    data['parameters'] = parameters\n"
+                "meta = json.loads({meta_literal!r})\n"
+                "if meta is not None:\n"
+                "    data['meta'] = meta\n"
                 "with json_path.open('w', encoding='utf-8') as handle:\n"
                 "    json.dump(data, handle)\n"
                 "stdout_handle.close()\n"
             )
             .replace("{network!r}", repr(self.cfg.network_interface))
             .replace("{parameters_literal!r}", repr(parameters_literal))
+            .replace("{meta_literal!r}", repr(meta_literal))
         )
         self.executor.run_python(script, conda=bool(self.cfg.conda_env))
 
@@ -1060,6 +1080,8 @@ class RemoteState:
             "parameters": parameters,
             "dry_run": True,
         }
+        if self.cfg.meta is not None:
+            data["meta"] = dict(self.cfg.meta)
         with json_path.open("w", encoding="utf-8") as handle:
             json.dump(data, handle)
 
@@ -1789,6 +1811,8 @@ def create_local_file(
             payload["ssh_hostname"] = cfg.ssh_hostname
     if parameters_payload is not None:
         payload["parameters"] = parameters_payload
+    if cfg.meta is not None:
+        payload["meta"] = dict(cfg.meta)
     local_state.write(payload)
     port_name = "port"
     if cfg.handshake is not None and cfg.handshake.port_name is not None:

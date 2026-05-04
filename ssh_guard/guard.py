@@ -167,6 +167,17 @@ def _is_allowed(command: str, service_binaries: frozenset) -> tuple[bool, str]:
 
 def main() -> None:
     command = os.environ.get("SSH_ORIGINAL_COMMAND", "")
+    if not command:
+        print(
+            "rhl-guard: this program is an SSH guard for remote-http-launcher.\n"
+            "It must be invoked via SSH, not run directly.\n\n"
+            "To install, add to ~/.ssh/authorized_keys on the remote server:\n"
+            '    command="rhl-guard" ssh-rsa AAAA... your-key-comment\n\n'
+            "To test a specific command:\n"
+            '    SSH_ORIGINAL_COMMAND="rhl-ps" rhl-guard',
+            file=sys.stderr,
+        )
+        sys.exit(1)
     service_binaries = _load_service_binaries()
     allowed, reason = _is_allowed(command, service_binaries)
 

@@ -51,6 +51,7 @@ The YAML configuration file supports the following fields:
 | `handshake` | no | HTTP path (and optional query parameters) for a health-check GET request |
 | `conda` | no | Conda environment to activate before launching the command |
 | `file_parameters` | no | Arbitrary parameters written into the server-side JSON file |
+| `meta` | no | Opaque caller-provided JSON metadata copied into client/server state |
 
 The `key` and `command` fields are Python f-string templates evaluated against the full config namespace.
 
@@ -127,7 +128,7 @@ The whitelist covers:
 - Conda probe fallbacks (`command -v conda`, `cat ~/.bashrc`, etc.) — only reached on servers where the conda cache has not been primed.
 
 Direct process-management commands such as `kill -1 <pid>` are rejected by
-the guard. Use helpers such as `rhl-kill-service <key>` instead.
+the guard. Use helpers such as `rhl-stop <key>` instead.
 
 ### Installation
 
@@ -139,6 +140,14 @@ command="rhl-guard" ssh-rsa AAAA... your-key-comment
 
 If you use a non-standard tools.yaml, set `RHL_TOOLS_YAML=/path/to/tools.yaml` in the server environment.
 
+Running `rhl-guard` directly prints an installation-oriented error explaining
+that it must be invoked by SSH. To test one guarded command locally on the
+server:
+
+```bash
+SSH_ORIGINAL_COMMAND="rhl-ps" rhl-guard
+```
+
 ### Conda cache (guarded servers)
 
 When the guard is active, the launcher replaces the individual conda probe SSH commands with a single cached read. Prime the cache once after installing the guard:
@@ -149,26 +158,58 @@ ssh <remote_host> rhl-cache-conda
 
 Re-run this if the conda environment changes. On unguarded servers the launcher falls back to its original probe behavior automatically — `rhl-cache-conda` is a no-op there too.
 
+## Lifecycle States
+
+Launcher state normally moves through these states:
+
+| State | Meaning |
+|-------|---------|
+| `absent` | No launcher state or persistent directory exists for the service |
+| `starting` | The process exists but has not yet reported a listening port |
+| `running` | The service reported a port and the process appears alive |
+| `failed` | Startup failed or a dry-run/server row explicitly records failure-like state |
+| `stale` | A non-persistent service has dead process state left for post-mortem inspection |
+| `persistent` | Filesystem-backed service data exists even if no process is running |
+
+The `stale` window is intentional for non-persistent services: inspect logs
+before removing the server JSON with `rhl-rm`. Persistent state can also make
+tests falsely pass because old data remains even when no process is alive; use
+`rhl-ps-persistent` or the Seamless service wrappers to inspect and clear it.
+
+## JSON State Schema
+
+Server JSON files live under `~/.remote-http-launcher/server/<key>.json` and
+client files under `~/.remote-http-launcher/client/<key>.json`. Readers tolerate
+older rows without `meta`. When present, `meta` is copied from the caller and is
+opaque to `remote-http-launcher`; the launcher does not validate service,
+cluster, project, or stage semantics.
+
 ## Helper commands (`rhl-*`)
 
 Installing `remote-http-launcher` adds a set of server-side helper programs that perform specific, safe operations on launcher state. These are the commands agents and operators should use instead of raw `kill`, `rm`, or shell loops.
 
-| Command | Description |
-|---------|-------------|
-| `rhl-guard` | SSH guard entry point — validates `SSH_ORIGINAL_COMMAND` before exec |
-| `rhl-cache-conda` | Discover conda setup and write `~/.remote-http-launcher/conda-setup.json` |
-| `rhl-cat-log <key>` | Print the stdout/stderr log for a service |
-| `rhl-cat-json <key>` | Pretty-print the server state JSON (PID, port, status, workdir) |
-| `rhl-ls-services [--client]` | List service keys (server-side by default, `--client` for local) |
-| `rhl-kill-service <key>` | Send SIGHUP to the service PID and remove its server state JSON |
-| `rhl-rm-state <key> [--client] [--server]` | Remove state JSON files (default: both) |
-| `rhl-restart-cluster <cluster>` | SIGHUP all services for a cluster and clean up their state files |
-| `rhl-clear-buffer <path>` | Remove all files directly inside a buffer directory |
-| `rhl-clear-db <path>` | Remove `seamless.db` from a database directory |
+| Command | Runs on | Purpose |
+|---------|---------|---------|
+| `rhl-guard` | server | SSH guard entry point; validates `SSH_ORIGINAL_COMMAND` before exec |
+| `rhl-cache-conda` | server | Discover conda setup and write `~/.remote-http-launcher/conda-setup.json` |
+| `rhl-ps [--client]` | client/server | List process state rows; client mode lists local connection state |
+| `rhl-ps-persistent <path>` | server | Report absent, empty, or populated filesystem-backed state |
+| `rhl-stop <key>` | server | Stop service processes without deleting JSON state |
+| `rhl-rm <key> [--client] [--server]` | client/server | Remove launcher JSON state files while leaving logs on disk |
+| `rhl-logs <key> [--tail N]` | server | Print the stdout/stderr log for a service |
+| `rhl-inspect <key>` | server | Pretty-print the server state JSON |
+| `rhl-clear <path>` | server | Remove direct children of a validated persistent directory |
 
-`rhl-clear-buffer` and `rhl-clear-db` validate that the target path is absolute and not a system directory before touching anything.
+`rhl-clear` and `rhl-ps-persistent` validate that target paths are absolute and
+not system directories before touching anything.
 
 All state-file helpers respect the `REMOTE_HTTP_LAUNCHER_DIR` environment variable (same as the launcher).
+
+Cluster-wide Seamless operations are intentionally not implemented by `rhl-*`
+helpers. Use `seamless-service-stop`, `seamless-service-rm`, and
+`seamless-service-ps` from `seamless-config`; those tools resolve Seamless
+cluster/project/stage semantics on the client side and then dispatch safe
+`rhl-*` operations.
 
 ## CLI scripts
 

@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 
+from ssh_guard._cli import handle_help
 from ssh_guard._state import conda_cache_path
 
 _CONDA_PATH_RE = re.compile(r"""[\"']([^\"']+/etc/profile\.d/conda\.sh)[\"']""")
@@ -55,6 +56,7 @@ def _run_conda(conda_source: str | None, *args: str) -> subprocess.CompletedProc
 
 
 def main() -> None:
+    handle_help(sys.argv[1:], "rhl-cache-conda", __doc__ or "")
     conda_source = _find_conda_source()
     if conda_source is None:
         # conda is on PATH — verify it's really there
