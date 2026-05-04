@@ -162,27 +162,58 @@ Re-run this if the conda environment changes. On unguarded servers the launcher 
 
 Launcher state normally moves through these states:
 
-| State | Meaning |
-|-------|---------|
-| `absent` | No launcher state or persistent directory exists for the service |
-| `starting` | The process exists but has not yet reported a listening port |
-| `running` | The service reported a port and the process appears alive |
-| `failed` | Startup failed or a dry-run/server row explicitly records failure-like state |
-| `stale` | A non-persistent service has dead process state left for post-mortem inspection |
-| `persistent` | Filesystem-backed service data exists even if no process is running |
+| State | Meaning | Next action |
+|-------|---------|-------------|
+| `absent` | No launcher state or persistent directory exists | — |
+| `starting` | Process launched, waiting for it to report a port | Wait, or check logs if it hangs |
+| `running` | Service healthy and port known | — |
+| `failed` | Startup failed or timed out | Read log with `rhl-logs`, fix, restart |
+| `stale` | Server JSON exists but process is dead | Read log with `rhl-logs`, then `rhl-rm` to clear |
+| `persistent` | Workdir contains data even when no process is running | `rhl-ps-persistent` to inspect; `rhl-clear` to wipe |
 
-The `stale` window is intentional for non-persistent services: inspect logs
-before removing the server JSON with `rhl-rm`. Persistent state can also make
-tests falsely pass because old data remains even when no process is alive; use
-`rhl-ps-persistent` or the Seamless service wrappers to inspect and clear it.
+**Persistent state causes false-pass test results.** A service launched against
+a populated buffer directory or `seamless.db` returns cached results without
+exercising the underlying computation. When a test passes suspiciously after
+changes that should affect results, use `rhl-ps-persistent` (or
+`seamless-service-ps --persistent` from `seamless-config`) to inspect cached
+data, and `rhl-clear` (or `seamless-service-clear`) to wipe it before
+re-testing on a cold cache.
+
+**The `stale` state is the post-mortem window for non-persistent services.**
+`jobserver`, `daskserver`, and `pure-daskserver` have no persistent data; the
+log file is the only post-mortem artefact, and it is reachable via `rhl-logs`
+only while the server JSON exists. Read the log *before* running `rhl-rm` — the
+log file itself survives JSON removal but is no longer addressable by key
+through the helper.
 
 ## JSON State Schema
 
 Server JSON files live under `~/.remote-http-launcher/server/<key>.json` and
-client files under `~/.remote-http-launcher/client/<key>.json`. Readers tolerate
-older rows without `meta`. When present, `meta` is copied from the caller and is
-opaque to `remote-http-launcher`; the launcher does not validate service,
-cluster, project, or stage semantics.
+client files under `~/.remote-http-launcher/client/<key>.json`. Readers must
+tolerate rows without `meta` — older launcher versions and callers that do not
+populate it still write valid state files.
+
+When written by `seamless-config`, the `meta` block contains:
+
+```json
+{
+  "meta": {
+    "service":    "hashserver",
+    "cluster":    "MYCLUSTER",
+    "mode":       "rw",
+    "project":    "myproject",
+    "subproject": null,
+    "stage":      "fingertip",
+    "substage":   null,
+    "queue":      null
+  }
+}
+```
+
+`rhl-ps --json` emits this block verbatim alongside the process-state fields
+(`key`, `status`, `port`, `pid`, `workdir`, `log`). The launcher treats `meta`
+as opaque and does not validate its contents — Seamless-specific semantics live
+entirely in `seamless-config`, not in `remote-http-launcher`.
 
 ## Helper commands (`rhl-*`)
 
