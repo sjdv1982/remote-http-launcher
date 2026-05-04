@@ -666,6 +666,49 @@ class Executor:
         self._conda_source: Optional[str] = None
         self._conda_unavailable = False
         self._conda_cache: Optional[Dict[str, Any]] = None
+        # None = unknown; True/False once we've observed a helper invocation.
+        self._helpers_available: Optional[bool] = None
+
+    def invoke_helper(
+        self,
+        argv: list[str],
+        *,
+        check: bool = True,
+        input_data: Optional[str] = None,
+    ) -> subprocess.CompletedProcess:
+        raise NotImplementedError
+
+    def _try_helper(
+        self,
+        argv: list[str],
+        *,
+        input_data: Optional[str] = None,
+    ) -> Optional[subprocess.CompletedProcess]:
+        """Best-effort helper invocation.
+
+        Returns None if rhl-* helpers are not installed on the target host
+        (caller should fall back to the legacy heredoc / bash path).
+        Otherwise returns the CompletedProcess; caller is responsible for
+        interpreting non-zero exit codes.
+        """
+        if self._helpers_available is False:
+            return None
+        result = self.invoke_helper(argv, check=False, input_data=input_data)
+        if self._helpers_available is None:
+            stderr_lower = result.stderr.lower() if result.stderr else ""
+            looks_missing = (
+                result.returncode == 127
+                or "command not found" in stderr_lower
+                or "no such file or directory" in stderr_lower
+            )
+            if looks_missing:
+                self._helpers_available = False
+                self.observer.on_detail(
+                    f"{self.host} rhl-* helpers unavailable; using fallback path"
+                )
+                return None
+            self._helpers_available = True
+        return result
 
     def _read_conda_cache(self) -> Optional[Dict[str, Any]]:
         """Read ~/.remote-http-launcher/conda-setup.json via a Python heredoc.
@@ -808,6 +851,30 @@ class SSHExecutor(Executor):
         )
         return result
 
+    def invoke_helper(
+        self,
+        argv: list[str],
+        *,
+        check: bool = True,
+        input_data: Optional[str] = None,
+    ) -> subprocess.CompletedProcess:
+        snippet = _command_snippet(" ".join(argv))
+        remote_command = shlex.join(argv)
+        self.observer.on_command(self.host, snippet, remote_command)
+        result = subprocess.run(
+            ["ssh", self._host, remote_command],
+            text=True,
+            capture_output=True,
+            input=input_data,
+        )
+        self.observer.on_command_done(self.host, snippet)
+        if check and result.returncode != 0:
+            raise LauncherError(
+                f"{self.host} helper failed: {remote_command}\n"
+                f"{result.stderr.strip()}"
+            )
+        return result
+
     def run_python(
         self, script: str, *, check: bool = True, conda: bool = False
     ) -> subprocess.CompletedProcess:
@@ -825,16 +892,14 @@ class SSHExecutor(Executor):
         return result.returncode == 0 and result.stdout.strip() != ""
 
     def kill_service(self, key: str, pid: int) -> bool:
-        result = subprocess.run(
-            ["ssh", self._host, "rhl-stop", key],
-            text=True,
-            capture_output=True,
-        )
-        if result.returncode == 0:
+        helper_result = self._try_helper(["rhl-stop", key])
+        if helper_result is None:
+            return False
+        if helper_result.returncode == 0:
             return True
         raise LauncherError(
             f"{self.host} command failed: rhl-stop {key}\n"
-            f"{result.stderr.strip()}"
+            f"{helper_result.stderr.strip()}"
         )
 
 
@@ -850,6 +915,29 @@ class LocalExecutor(Executor):
             text=True,
             capture_output=True,
         )
+        return result
+
+    def invoke_helper(
+        self,
+        argv: list[str],
+        *,
+        check: bool = True,
+        input_data: Optional[str] = None,
+    ) -> subprocess.CompletedProcess:
+        snippet = _command_snippet(" ".join(argv))
+        self.observer.on_command(self.host, snippet, " ".join(argv))
+        result = subprocess.run(
+            argv,
+            text=True,
+            capture_output=True,
+            input=input_data,
+        )
+        self.observer.on_command_done(self.host, snippet)
+        if check and result.returncode != 0:
+            raise LauncherError(
+                f"{self.host} helper failed: {' '.join(argv)}\n"
+                f"{result.stderr.strip()}"
+            )
         return result
 
     def run_python(
@@ -873,7 +961,15 @@ class LocalExecutor(Executor):
         return result.returncode == 0 and result.stdout.strip() != ""
 
     def kill_service(self, key: str, pid: int) -> bool:
-        return False
+        helper_result = self._try_helper(["rhl-stop", key])
+        if helper_result is None:
+            return False
+        if helper_result.returncode == 0:
+            return True
+        raise LauncherError(
+            f"{self.host} command failed: rhl-stop {key}\n"
+            f"{helper_result.stderr.strip()}"
+        )
 
 
 @dataclasses.dataclass
@@ -895,7 +991,19 @@ class RemoteState:
         return os.path.join(self.remote_dir, REMOTE_LOG_NAME.format(key=self.cfg.key))
 
     def exists(self) -> bool:
-
+        helper_result = self.executor._try_helper(["rhl-inspect", self.cfg.key])
+        if helper_result is not None:
+            if helper_result.returncode != 0:
+                return False
+            try:
+                data = json.loads(helper_result.stdout)
+            except json.JSONDecodeError:
+                return False
+            if isinstance(data, dict) and data.get("dry_run"):
+                self.executor._try_helper(["rhl-rm", self.cfg.key, "--server"])
+                return False
+            return True
+        # Fallback: helpers not installed on the target host.
         script = (
             "import pathlib\n"
             f"path = pathlib.Path({self.json_path!r}).expanduser()\n"
@@ -919,6 +1027,18 @@ class RemoteState:
         self.executor.run_shell(script, check=False, conda=False)
 
     def remove(self) -> None:
+        helper_result = self.executor._try_helper(
+            ["rhl-rm", self.cfg.key, "--server"]
+        )
+        if helper_result is not None:
+            # rhl-rm prints "{key}: not found" with exit 0 when the file is
+            # missing, which matches the heredoc's FileNotFoundError silence.
+            if helper_result.returncode != 0:
+                raise LauncherError(
+                    f"rhl-rm failed: {helper_result.stderr.strip()}"
+                )
+            return
+        # Fallback: helpers not installed on the target host.
         script = (
             "import pathlib\n"
             f"path = pathlib.Path({self.json_path!r}).expanduser()\n"
@@ -932,6 +1052,17 @@ class RemoteState:
         self.executor.run_python(script, check=True, conda=bool(self.cfg.conda_env))
 
     def read(self) -> Dict[str, Any]:
+        helper_result = self.executor._try_helper(["rhl-inspect", self.cfg.key])
+        if helper_result is not None:
+            if helper_result.returncode != 0:
+                raise LauncherError(
+                    f"rhl-inspect failed: {helper_result.stderr.strip()}"
+                )
+            try:
+                return json.loads(helper_result.stdout)
+            except json.JSONDecodeError as exc:
+                raise LauncherError("Remote connection JSON is malformed.") from exc
+        # Fallback: helpers not installed on the target host.
         script = (
             "import json, pathlib, sys\n"
             f"path = pathlib.Path({self.json_path!r}).expanduser()\n"
@@ -960,6 +1091,13 @@ class RemoteState:
         return payload
 
     def read_log(self) -> Optional[str]:
+        helper_result = self.executor._try_helper(["rhl-logs", self.cfg.key])
+        if helper_result is not None:
+            if helper_result.returncode != 0:
+                return None
+            text = helper_result.stdout.strip()
+            return text or None
+        # Fallback: helpers not installed on the target host.
         script = (
             "import json, pathlib, sys, time\n"
             f"path = pathlib.Path({self.json_path!r}).expanduser()\n"
