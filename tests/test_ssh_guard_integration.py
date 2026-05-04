@@ -1,6 +1,7 @@
 import pathlib
 import subprocess
 import sys
+import json
 
 import pytest
 
@@ -107,6 +108,21 @@ def test_rhl_rm_leaves_logs(tmp_path: pathlib.Path) -> None:
     assert result.returncode == 0
     assert not (server / "demo.json").exists()
     assert (server / "demo.log").exists()
+
+
+def test_rhl_stop_marks_server_state_stale(tmp_path: pathlib.Path) -> None:
+    server = tmp_path / "server"
+    server.mkdir()
+    (server / "demo.json").write_text(
+        '{"pid": 999999999, "status": "running", "port": 1234}',
+        encoding="utf-8",
+    )
+
+    result = _run_helper(tmp_path, "ssh_guard.helpers.stop", "demo")
+
+    assert result.returncode == 0
+    data = json.loads((server / "demo.json").read_text(encoding="utf-8"))
+    assert data["status"] == "stale"
 
 
 def test_rhl_clear_removes_direct_children(tmp_path: pathlib.Path) -> None:

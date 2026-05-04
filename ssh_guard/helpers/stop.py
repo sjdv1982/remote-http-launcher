@@ -6,6 +6,7 @@ import os
 import signal
 import sys
 import time
+import json
 
 from ssh_guard._cli import die, handle_help
 from ssh_guard._state import key_to_server_json, pid_is_live, read_json_file, validate_key
@@ -51,6 +52,20 @@ def _poll(survivors: dict[str, int], seconds: float = 5.0) -> dict[str, int]:
     return survivors
 
 
+def _mark_stale(key: str) -> None:
+    path = key_to_server_json(key)
+    data = read_json_file(path, prefix="rhl-stop")
+    if data is None:
+        return
+    data["status"] = "stale"
+    tmp_path = path.with_suffix(".tmp")
+    try:
+        tmp_path.write_text(json.dumps(data), encoding="utf-8")
+        tmp_path.replace(path)
+    except OSError as exc:
+        die("rhl-stop", f"could not mark {key} stale: {exc}")
+
+
 def main() -> None:
     args = sys.argv[1:]
     handle_help(args, USAGE, DESCRIPTION)
@@ -92,6 +107,9 @@ def main() -> None:
         survivors.pop(key, None)
 
     for key in args:
+        outcome = outcomes.get(key, "stopped")
+        if outcome in ("stopped", "already gone", "kill required"):
+            _mark_stale(key)
         print(f"{key}: {outcomes.get(key, 'stopped')}")
     raise SystemExit(exit_code)
 
