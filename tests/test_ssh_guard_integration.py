@@ -154,6 +154,19 @@ def test_rhl_clear_removes_direct_children(tmp_path: pathlib.Path) -> None:
     assert list(root.iterdir()) == []
 
 
+def test_rhl_clear_expands_home(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "home"
+    root = home / "clearable"
+    root.mkdir(parents=True)
+    (root / "file").write_text("x", encoding="utf-8")
+    monkeypatch.setenv("HOME", home.as_posix())
+
+    result = _run_helper(tmp_path, "ssh_guard.helpers.clear", "~/clearable")
+
+    assert result.returncode == 0
+    assert list(root.iterdir()) == []
+
+
 def test_service_binary_loader_default_and_override(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -489,18 +502,19 @@ def test_rhl_launch_service_conda_cache_path(tmp_path: pathlib.Path) -> None:
 
 
 def test_guard_only_accepts_top_level_helpers() -> None:
-    from ssh_guard.guard import _is_allowed
+    from ssh_guard.guard import _parse_and_check
 
-    assert _is_allowed("rhl-ps")[0]
+    assert _parse_and_check("rhl-ps")[0] is not None
     for command in [
         "kill -1 999999",
         "python3 -c 'print(1)'",
         "bash -lc 'ps -p 1 -o pid='",
         "bash -lc 'cat ~/.bashrc'",
         "bash -lc \"python3 - <<'__RHL_REMOTE_SCRIPT__'\\nprint(1)\\n__RHL_REMOTE_SCRIPT__\"",
+        "'rhl-ps\n'",
     ]:
-        allowed, _reason = _is_allowed(command)
-        assert not allowed
+        args, _reason = _parse_and_check(command)
+        assert args is None
 
 
 def test_rhl_ps_persistent_file_modes(tmp_path: pathlib.Path) -> None:
@@ -523,6 +537,45 @@ def test_rhl_ps_persistent_file_modes(tmp_path: pathlib.Path) -> None:
     assert result.returncode == 0
     assert '"state": "populated"' in result.stdout
     assert '"size": 2' in result.stdout
+
+
+def test_rhl_ps_persistent_expands_home(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "home"
+    root = home / "persistent"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("HOME", home.as_posix())
+
+    result = _run_helper(tmp_path, "ssh_guard.helpers.ps_persistent", "~/persistent", "--json")
+
+    assert result.returncode == 0
+    row = json.loads(result.stdout)
+    assert row["path"] == root.as_posix()
+    assert row["state"] == "empty"
+
+
+def test_rhl_ps_persistent_marker_filters_reported_directories(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "persistent"
+    project = root / "project"
+    bucket = project / "aa"
+    bucket.mkdir(parents=True)
+    (project / ".HASHSERVER_PREFIX").write_text("", encoding="utf-8")
+    (bucket / "payload").write_text("data", encoding="utf-8")
+
+    result = _run_helper(
+        tmp_path,
+        "ssh_guard.helpers.ps_persistent",
+        root.as_posix(),
+        "--level",
+        "2",
+        "--marker",
+        ".HASHSERVER_PREFIX",
+        "--json",
+    )
+
+    assert result.returncode == 0
+    rows = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [row["path"] for row in rows] == [project.as_posix()]
+    assert rows[0]["state"] == "populated"
 
 
 @pytest.mark.parametrize(

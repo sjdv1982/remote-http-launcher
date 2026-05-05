@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+from pathlib import Path
 
 from ssh_guard._cli import die, handle_help
 from ssh_guard._state import validate_clearable_path
@@ -17,7 +18,7 @@ def main() -> None:
     handle_help(args, USAGE, DESCRIPTION)
     if len(args) != 1:
         die("rhl-clear", "exactly one path is required")
-    path = validate_clearable_path(args[0])
+    path = validate_clearable_path(str(Path(args[0]).expanduser()))
     if not path.exists():
         die("rhl-clear", f"path does not exist: {path}")
     if not path.is_dir():
