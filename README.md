@@ -114,18 +114,13 @@ print(result["hostname"], result["port"])
 
 ## SSH Guard
 
-`remote-http-launcher` ships an SSH guard (`rhl-guard`) that restricts what commands can be run on the remote server under the service user account. When installed, only the specific command patterns sent by the launcher itself and a set of named helper programs are permitted — naked shell commands such as `pkill`, `rm -rf`, or arbitrary `python3 -c` are rejected.
+`remote-http-launcher` ships an SSH guard (`rhl-guard`) that restricts what commands can be run on the remote server under the service user account. When installed, only named `rhl-*` helper programs are permitted — naked shell commands such as `pkill`, `rm -rf`, `bash -lc ...`, or arbitrary `python3 -c` are rejected.
 
 ### How it works
 
 The SSH `command=` option in `authorized_keys` forces every incoming SSH session through `rhl-guard`. The guard reads `SSH_ORIGINAL_COMMAND`, validates it against a whitelist, and either `exec`s the command or exits with an error. Interactive sessions (no `SSH_ORIGINAL_COMMAND`) are always rejected.
 
-The whitelist covers:
-
-- `bash -lc` commands matching the exact patterns that `remote-http-launcher` generates: `ps -p <int> -o pid=` and Python heredoc scripts bearing the launcher's `__RHL_REMOTE_SCRIPT__` sentinel.
-- Inside Python heredoc launch scripts, the guard verifies that the service binary is one of the tools listed in `ssh_guard/tools.yaml` (a vendored copy of the Seamless `tools.yaml`).
-- Any `rhl-*` helper command installed by this package (see below).
-- Conda probe fallbacks (`command -v conda`, `cat ~/.bashrc`, etc.) — only reached on servers where the conda cache has not been primed.
+The guard whitelist covers only top-level `rhl-*` helper commands installed by this package (see below). The helpers perform state inspection, process checks, HTTP handshakes, port verification, conda cache reads, and service launch using structured argv/data instead of remote shell or Python source.
 
 Direct process-management commands such as `kill -1 <pid>` are rejected by
 the guard. Use helpers such as `rhl-stop <key>` instead.
@@ -138,8 +133,6 @@ On the remote server, add to `~/.ssh/authorized_keys`:
 command="rhl-guard" ssh-rsa AAAA... your-key-comment
 ```
 
-If you use a non-standard tools.yaml, set `RHL_TOOLS_YAML=/path/to/tools.yaml` in the server environment.
-
 Running `rhl-guard` directly prints an installation-oriented error explaining
 that it must be invoked by SSH. To test one guarded command locally on the
 server:
@@ -148,15 +141,15 @@ server:
 SSH_ORIGINAL_COMMAND="rhl-ps" rhl-guard
 ```
 
-### Conda cache (guarded servers)
+### Conda cache
 
-When the guard is active, the launcher replaces the individual conda probe SSH commands with a single cached read. Prime the cache once after installing the guard:
+The launcher reads conda configuration via `rhl-conda-info` automatically. Prime the cache once on the remote server before using conda environments:
 
 ```bash
 ssh <remote_host> rhl-cache-conda
 ```
 
-Re-run this if the conda environment changes. On unguarded servers the launcher falls back to its original probe behavior automatically — `rhl-cache-conda` is a no-op there too.
+Re-run this if the conda installation or environments change. On hosts where no `rhl-*` helpers are installed, the launcher falls back to inline heredoc probes automatically.
 
 ## Lifecycle States
 
@@ -223,12 +216,17 @@ Installing `remote-http-launcher` adds a set of server-side helper programs that
 |---------|---------|---------|
 | `rhl-guard` | server | SSH guard entry point; validates `SSH_ORIGINAL_COMMAND` before exec |
 | `rhl-cache-conda` | server | Discover conda setup and write `~/.remote-http-launcher/conda-setup.json` |
+| `rhl-conda-info` | server | Print the cached conda-setup JSON; exit 1 if cache is absent |
+| `rhl-launch-service --key K --workdir D [--conda-env E] [--network-interface I] [--parameters J] [--meta J] -- BINARY ARG...` | server | Launch a whitelisted service binary as a daemon; write server-side JSON |
+| `rhl-inspect <key> [--with-mtime]` | server | Pretty-print the server state JSON; `--with-mtime` emits `{"mtime": …, "data": …}` |
+| `rhl-logs <key> [--tail N]` | server | Print the stdout/stderr log for a service |
+| `rhl-stop <key>` | server | Stop service processes without deleting JSON state |
+| `rhl-pid-alive PID` | server | Exit 0 if the process is alive, 1 if it is not |
+| `rhl-verify-port HOST PORT` | server | TCP-connect to HOST:PORT (3 retries); exit 0 on success, 1 on failure |
+| `rhl-handshake URL` | server | GET URL; exit 0 on 2xx, 1 on network error, 2 on non-2xx status |
 | `rhl-ps [--client]` | client/server | List process state rows; client mode lists local connection state |
 | `rhl-ps-persistent <path>` | server | Report absent, empty, or populated filesystem-backed state |
-| `rhl-stop <key>` | server | Stop service processes without deleting JSON state |
 | `rhl-rm <key> [--client] [--server]` | client/server | Remove launcher JSON state files while leaving logs on disk |
-| `rhl-logs <key> [--tail N]` | server | Print the stdout/stderr log for a service |
-| `rhl-inspect <key>` | server | Pretty-print the server state JSON |
 | `rhl-clear <path>` | server | Remove direct children of a validated persistent directory |
 
 `rhl-clear` and `rhl-ps-persistent` validate that target paths are absolute and

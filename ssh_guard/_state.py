@@ -1,9 +1,9 @@
 """Shared path resolution, state loading, and key validation for ssh_guard helpers."""
 
+import pathlib
 import json
 import os
 import re
-import pathlib
 from typing import Any
 
 _BASE_ENV = "REMOTE_HTTP_LAUNCHER_DIR"
@@ -74,6 +74,21 @@ def validate_clearable_path(path: str) -> pathlib.Path:
     # No '..' components allowed in the raw path
     if ".." in p.parts:
         raise SystemExit(f"rhl: path must not contain '..': {path!r}")
+    return p
+
+
+def validate_workdir(path: str) -> pathlib.Path:
+    p = pathlib.Path(path).expanduser()
+    if not p.is_absolute():
+        raise SystemExit(f"rhl: workdir must be absolute: {path!r}")
+    if ".." in pathlib.Path(path).parts:
+        raise SystemExit(f"rhl: workdir must not contain '..': {path!r}")
+    try:
+        resolved = p.resolve(strict=False)
+    except OSError:
+        resolved = p
+    if str(resolved) in _FORBIDDEN_ROOTS or str(p) in _FORBIDDEN_ROOTS:
+        raise SystemExit(f"rhl: refusing to use system directory as workdir: {path!r}")
     return p
 
 

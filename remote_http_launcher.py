@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import posixpath
 import pathlib
 import re
 import shlex
@@ -668,6 +669,7 @@ class Executor:
         self._conda_cache: Optional[Dict[str, Any]] = None
         # None = unknown; True/False once we've observed a helper invocation.
         self._helpers_available: Optional[bool] = None
+        self._launch_script_uploaded = False
 
     def invoke_helper(
         self,
@@ -711,10 +713,20 @@ class Executor:
         return result
 
     def _read_conda_cache(self) -> Optional[Dict[str, Any]]:
-        """Read ~/.remote-http-launcher/conda-setup.json via a Python heredoc.
+        """Read ~/.remote-http-launcher/conda-setup.json.
 
         Returns the parsed dict or None on cache miss or parse error.
         """
+        helper_result = self._try_helper(["rhl-conda-info"])
+        if helper_result is not None:
+            if helper_result.returncode != 0:
+                return None
+            try:
+                data = json.loads(helper_result.stdout.strip())
+            except (json.JSONDecodeError, ValueError):
+                return None
+            return data if isinstance(data, dict) else None
+
         cache_env = "REMOTE_HTTP_LAUNCHER_DIR"
         script = (
             "import json, pathlib, sys, os\n"
@@ -729,9 +741,10 @@ class Executor:
         if result.returncode != 0:
             return None
         try:
-            return json.loads(result.stdout.strip())
+            data = json.loads(result.stdout.strip())
         except (json.JSONDecodeError, ValueError):
             return None
+        return data if isinstance(data, dict) else None
 
     def run_shell(
         self, command: str, *, check: bool = True, conda: bool = False
@@ -770,7 +783,9 @@ class Executor:
         if cache is None:
             # Step 2: prime cache via rhl-cache-conda (whitelisted helper)
             self.observer.on_detail(f"{self.host} conda cache miss, running rhl-cache-conda")
-            self.run_shell("rhl-cache-conda", check=False, conda=False)
+            helper_result = self._try_helper(["rhl-cache-conda"])
+            if helper_result is None:
+                self.run_shell("rhl-cache-conda", check=False, conda=False)
             cache = self._read_conda_cache()
         if cache is not None:
             self._conda_cache = cache
@@ -831,6 +846,18 @@ class Executor:
     ) -> subprocess.CompletedProcess:
         raise NotImplementedError
 
+    def upload_text(self, remote_path: str, content: str) -> None:
+        raise NotImplementedError
+
+    def invoke_uploaded_launch(
+        self,
+        script_path: str,
+        argv: list[str],
+        *,
+        env: Optional[Dict[str, str]] = None,
+    ) -> subprocess.CompletedProcess:
+        raise NotImplementedError
+
     def process_exists(self, pid: int) -> bool:
         raise NotImplementedError
 
@@ -888,8 +915,53 @@ class SSHExecutor(Executor):
         return self.run_shell(command, check=check, conda=conda)
 
     def process_exists(self, pid: int) -> bool:
+        helper_result = self._try_helper(["rhl-pid-alive", str(pid)])
+        if helper_result is not None:
+            return helper_result.returncode == 0
         result = self.run_shell(f"ps -p {pid} -o pid=", check=False)
         return result.returncode == 0 and result.stdout.strip() != ""
+
+    def upload_text(self, remote_path: str, content: str) -> None:
+        code = (
+            "import pathlib,sys\n"
+            "p=pathlib.Path(sys.argv[1]).expanduser()\n"
+            "p.parent.mkdir(parents=True, exist_ok=True)\n"
+            "p.write_text(sys.stdin.read(), encoding='utf-8')\n"
+            "p.chmod(0o700)\n"
+        )
+        remote_command = shlex.join(["python3", "-c", code, remote_path])
+        result = subprocess.run(
+            ["ssh", self._host, remote_command],
+            text=True,
+            capture_output=True,
+            input=content,
+        )
+        if result.returncode != 0:
+            raise LauncherError(
+                f"{self.host} upload failed: {remote_path}\n{result.stderr.strip()}"
+            )
+
+    def invoke_uploaded_launch(
+        self,
+        script_path: str,
+        argv: list[str],
+        *,
+        env: Optional[Dict[str, str]] = None,
+    ) -> subprocess.CompletedProcess:
+        prefix: list[str] = []
+        if env:
+            prefix = ["env", *[f"{key}={value}" for key, value in env.items()]]
+        remote_argv = [*prefix, "python3", script_path, *argv]
+        remote_command = shlex.join(remote_argv)
+        snippet = _command_snippet(remote_command)
+        self.observer.on_command(self.host, snippet, remote_command)
+        result = subprocess.run(
+            ["ssh", self._host, remote_command],
+            text=True,
+            capture_output=True,
+        )
+        self.observer.on_command_done(self.host, snippet)
+        return result
 
     def kill_service(self, key: str, pid: int) -> bool:
         helper_result = self._try_helper(["rhl-stop", key])
@@ -953,12 +1025,38 @@ class LocalExecutor(Executor):
         return self.run_shell(command, check=check, conda=conda)
 
     def process_exists(self, pid: int) -> bool:
+        helper_result = self._try_helper(["rhl-pid-alive", str(pid)])
+        if helper_result is not None:
+            return helper_result.returncode == 0
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "pid="],
             text=True,
             capture_output=True,
         )
         return result.returncode == 0 and result.stdout.strip() != ""
+
+    def upload_text(self, remote_path: str, content: str) -> None:
+        path = pathlib.Path(remote_path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o700)
+
+    def invoke_uploaded_launch(
+        self,
+        script_path: str,
+        argv: list[str],
+        *,
+        env: Optional[Dict[str, str]] = None,
+    ) -> subprocess.CompletedProcess:
+        merged_env = os.environ.copy()
+        if env:
+            merged_env.update(env)
+        return subprocess.run(
+            ["python3", str(pathlib.Path(script_path).expanduser()), *argv],
+            text=True,
+            capture_output=True,
+            env=merged_env,
+        )
 
     def kill_service(self, key: str, pid: int) -> bool:
         helper_result = self._try_helper(["rhl-stop", key])
@@ -1078,6 +1176,26 @@ class RemoteState:
             raise LauncherError("Remote connection JSON is malformed.") from exc
 
     def stat_and_read(self) -> Dict[str, Any]:
+        helper_result = self.executor._try_helper(
+            ["rhl-inspect", self.cfg.key, "--with-mtime"]
+        )
+        if helper_result is not None:
+            if helper_result.returncode != 0:
+                raise LauncherError(
+                    f"rhl-inspect --with-mtime failed: {helper_result.stderr.strip()}"
+                )
+            try:
+                payload = json.loads(helper_result.stdout)
+            except json.JSONDecodeError as exc:
+                raise LauncherError("Remote connection JSON is malformed.") from exc
+            if not (
+                isinstance(payload, dict)
+                and "mtime" in payload
+                and isinstance(payload.get("data"), dict)
+            ):
+                raise LauncherError("Remote stat/read payload is malformed.")
+            return payload
+
         script = (
             "import json, pathlib, sys, time\n"
             f"path = pathlib.Path({self.json_path!r}).expanduser()\n"
@@ -1127,74 +1245,59 @@ class RemoteState:
 
     def launch_process(self, conda_base: Optional[str]) -> None:
         evaluated_command = self.evaluate_command()
-        command = evaluated_command
-        parameters_literal = (
-            json.dumps(self.cfg.file_parameters)
-            if self.cfg.file_parameters is not None
-            else "null"
-        )
-        meta_literal = json.dumps(self.cfg.meta) if self.cfg.meta is not None else "null"
-        if self.cfg.conda_env:
-            if not conda_base:
-                raise LauncherError(
-                    "Conda base path is required to activate environment."
-                )
-            activation = (
-                f"source {shlex.quote(os.path.join(conda_base, 'etc/profile.d/conda.sh'))} && "
-                f"conda activate {shlex.quote(self.cfg.conda_env)} && {evaluated_command}"
-            )
-            command = activation
+        try:
+            service_argv = shlex.split(evaluated_command)
+        except ValueError as exc:
+            raise LauncherError(f"Failed to split evaluated command: {exc}") from exc
+        if not service_argv:
+            raise LauncherError("The command must include a service binary.")
 
-        script = (
-            (
-                "import json, pathlib, tempfile, os, subprocess, sys\n"
-                f"remote_dir = pathlib.Path({self.remote_dir!r}).expanduser()\n"
-                "remote_dir.mkdir(parents=True, exist_ok=True)\n"
-                f"json_path = pathlib.Path({self.json_path!r}).expanduser()\n"
-                f"log_file = pathlib.Path({self.log_path!r}).expanduser()\n"
-                "try:\n"
-                "    log_file.unlink()\n"
-                "except FileNotFoundError:\n"
-                "    pass\n"
-                "stdout_handle = open(log_file.as_posix(), 'ab', buffering=0)\n"
-                f"command = {command!r}\n"
-                f"workdir = pathlib.Path({self.cfg.workdir!r}).expanduser()\n"
-                "workdir.mkdir(parents=True, exist_ok=True)\n"
-                "proc = subprocess.Popen(\n"
-                "    command,\n"
-                "    shell=True,\n"
-                "    cwd=workdir,\n"
-                "    stdout=stdout_handle,\n"
-                "    stderr=subprocess.STDOUT,\n"
-                "    start_new_session=True,\n"
-                "    executable='/bin/bash',\n"
-                ")\n"
-                "data = {\n"
-                f"    'workdir': {self.cfg.workdir!r},\n"
-                "    'log': log_file.as_posix(),\n"
-                f"    'command': {evaluated_command!r},\n"
-                "    'uid': os.getuid(),\n"
-                "    'pid': proc.pid,\n"
-                "    'status': 'starting',\n"
-                "}\n"
-                "network_interface = {network!r}\n"
-                "if network_interface is not None:\n"
-                "    data['network_interface'] = network_interface\n"
-                "parameters = json.loads({parameters_literal!r})\n"
-                "if parameters is not None:\n"
-                "    data['parameters'] = parameters\n"
-                "meta = json.loads({meta_literal!r})\n"
-                "if meta is not None:\n"
-                "    data['meta'] = meta\n"
-                "with json_path.open('w', encoding='utf-8') as handle:\n"
-                "    json.dump(data, handle)\n"
-                "stdout_handle.close()\n"
+        argv = [
+            "rhl-launch-service",
+            "--key",
+            self.cfg.key,
+            "--workdir",
+            self.cfg.workdir,
+        ]
+        if self.cfg.conda_env:
+            argv += ["--conda-env", self.cfg.conda_env]
+        if self.cfg.network_interface:
+            argv += ["--network-interface", self.cfg.network_interface]
+        if self.cfg.file_parameters is not None:
+            argv += ["--parameters", json.dumps(self.cfg.file_parameters)]
+        if self.cfg.meta is not None:
+            argv += ["--meta", json.dumps(self.cfg.meta)]
+        argv += ["--", *service_argv]
+
+        helper_result = self.executor._try_helper(argv)
+        if helper_result is not None:
+            if helper_result.returncode == 0:
+                return
+            raise LauncherError(
+                f"rhl-launch-service failed: {helper_result.stderr.strip()}"
             )
-            .replace("{network!r}", repr(self.cfg.network_interface))
-            .replace("{parameters_literal!r}", repr(parameters_literal))
-            .replace("{meta_literal!r}", repr(meta_literal))
-        )
-        self.executor.run_python(script, conda=bool(self.cfg.conda_env))
+
+        fallback_argv = argv[1:]
+        script_path = self._uploaded_launch_script_path()
+        if not self.executor._launch_script_uploaded:
+            self.executor.upload_text(script_path, _fallback_launch_script_source())
+            self.executor._launch_script_uploaded = True
+        env = None
+        if self.cfg.conda_env and conda_base:
+            env = {
+                "RHL_FALLBACK_CONDA_SOURCE": os.path.join(
+                    conda_base, "etc/profile.d/conda.sh"
+                )
+            }
+        result = self.executor.invoke_uploaded_launch(script_path, fallback_argv, env=env)
+        if result.returncode != 0:
+            raise LauncherError(
+                f"uploaded launch_service.py failed: {result.stderr.strip()}"
+            )
+
+    def _uploaded_launch_script_path(self) -> str:
+        base = posixpath.dirname(self.remote_dir.rstrip("/"))
+        return posixpath.join(base, "launch_service.py")
 
     def write_dry_run_metadata(self, evaluated_command: str) -> None:
         remote_dir = pathlib.Path(self.remote_dir).expanduser()
@@ -1224,6 +1327,16 @@ class RemoteState:
             json.dump(data, handle)
 
     def verify_port_in_use(self, host: str, port: int) -> None:
+        helper_result = self.executor._try_helper(
+            ["rhl-verify-port", host, str(port)]
+        )
+        if helper_result is not None:
+            if helper_result.returncode == 0:
+                return
+            raise LauncherError(
+                f"rhl-verify-port failed: {helper_result.stderr.strip()}"
+            )
+
         script = (
             "import socket, sys, time\n"
             f"host = {host!r}\n"
@@ -1248,6 +1361,14 @@ class RemoteState:
         self, host: str, port: int, handshake: HandshakeConfig | None
     ) -> None:
         url = build_handshake_url(host, port, handshake)
+        helper_result = self.executor._try_helper(["rhl-handshake", url])
+        if helper_result is not None:
+            if helper_result.returncode == 0:
+                return
+            raise LauncherError(
+                f"rhl-handshake failed: {helper_result.stderr.strip()}"
+            )
+
         script = (
             "import sys, urllib.error, urllib.request\n"
             f"url = {url!r}\n"
@@ -1333,6 +1454,162 @@ def build_handshake_url(host: str, port: int, handshake: HandshakeConfig | None)
     return urllib.parse.urlunparse(
         ("http", f"{host}:{port}", norm_path or "/", "", query, "")
     )
+
+
+def _fallback_launch_script_source() -> str:
+    from ssh_guard._tools import load_service_binaries
+
+    binaries_json = json.dumps(sorted(load_service_binaries()))
+    return textwrap.dedent(
+        f"""
+        #!/usr/bin/env python3
+        from __future__ import annotations
+        import argparse, json, os, pathlib, re, shlex, subprocess, sys, tempfile
+
+        SERVICE_BINARIES = frozenset(json.loads({binaries_json!r}))
+        KEY_RE = re.compile(r'^[a-zA-Z0-9._-]+$')
+        FORBIDDEN_ROOTS = {{"/", "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64",
+                           "/boot", "/sys", "/proc", "/dev", "/run", "/var", "/opt"}}
+
+        def die(message):
+            print(f"rhl-launch-service-fallback: {{message}}", file=sys.stderr)
+            raise SystemExit(1)
+
+        def base_dir():
+            raw = os.environ.get("REMOTE_HTTP_LAUNCHER_DIR", "~/.remote-http-launcher")
+            return pathlib.Path(raw).expanduser()
+
+        def server_dir():
+            return base_dir() / "server"
+
+        def validate_key(key):
+            if not KEY_RE.fullmatch(key):
+                die(f"invalid key {{key!r}}")
+
+        def validate_workdir(path):
+            p = pathlib.Path(path).expanduser()
+            if not p.is_absolute():
+                die(f"workdir must be absolute: {{path!r}}")
+            if ".." in pathlib.Path(path).parts:
+                die(f"workdir must not contain '..': {{path!r}}")
+            resolved = p.resolve(strict=False)
+            if str(resolved) in FORBIDDEN_ROOTS or str(p) in FORBIDDEN_ROOTS:
+                die(f"refusing to use system directory as workdir: {{path!r}}")
+            return p
+
+        def json_object(raw, label):
+            if raw is None:
+                return None
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                die(f"{{label}} must be valid JSON: {{exc}}")
+            if not isinstance(data, dict):
+                die(f"{{label}} must be a JSON object")
+            return data
+
+        def relative_to(path, parent):
+            try:
+                path.relative_to(parent)
+                return True
+            except ValueError:
+                return False
+
+        def validate_status_file_args(args):
+            root = server_dir().resolve(strict=False)
+            i = 0
+            while i < len(args):
+                token = args[i]
+                value = None
+                if token == "--status-file":
+                    if i + 1 >= len(args):
+                        die("--status-file requires a value")
+                    value = args[i + 1]
+                    i += 2
+                elif token.startswith("--status-file="):
+                    value = token.split("=", 1)[1]
+                    i += 1
+                else:
+                    i += 1
+                if value is None:
+                    continue
+                p = pathlib.Path(value).expanduser()
+                if not p.is_absolute():
+                    die("--status-file must be absolute")
+                if not relative_to(p.resolve(strict=False), root):
+                    die("--status-file must live under the launcher server directory")
+
+        def conda_command(argv, env_name):
+            source = os.environ.get("RHL_FALLBACK_CONDA_SOURCE")
+            if not source:
+                cache = base_dir() / "conda-setup.json"
+                if cache.exists():
+                    data = json.loads(cache.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        source = data.get("conda_source")
+            prefix = f"source {{shlex.quote(source)}} && " if source else ""
+            return f"{{prefix}}conda activate {{shlex.quote(env_name)}} && exec {{shlex.join(argv)}}"
+
+        def write_state(path, data):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(prefix=f".{{path.stem}}.", suffix=".tmp", dir=path.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(data, handle)
+                os.replace(tmp_name, path)
+            except Exception:
+                try:
+                    os.unlink(tmp_name)
+                except FileNotFoundError:
+                    pass
+                raise
+
+        def main():
+            parser = argparse.ArgumentParser(prog="launch_service.py")
+            parser.add_argument("--key", required=True)
+            parser.add_argument("--workdir", required=True)
+            parser.add_argument("--conda-env")
+            parser.add_argument("--network-interface")
+            parser.add_argument("--parameters")
+            parser.add_argument("--meta")
+            parser.add_argument("service_argv", nargs=argparse.REMAINDER)
+            ns = parser.parse_args()
+            argv = list(ns.service_argv)
+            if argv and argv[0] == "--":
+                argv = argv[1:]
+            if not argv:
+                die("service binary is required after --")
+            validate_key(ns.key)
+            workdir = validate_workdir(ns.workdir)
+            parameters = json_object(ns.parameters, "--parameters")
+            meta = json_object(ns.meta, "--meta")
+            if argv[0] not in SERVICE_BINARIES:
+                die(f"service binary is not whitelisted: {{argv[0]!r}}")
+            validate_status_file_args(argv[1:])
+            srv = server_dir()
+            srv.mkdir(parents=True, exist_ok=True)
+            workdir.mkdir(parents=True, exist_ok=True)
+            json_path = srv / f"{{ns.key}}.json"
+            log_path = srv / f"{{ns.key}}.log"
+            with log_path.open("wb", buffering=0) as stdout_handle:
+                if ns.conda_env:
+                    cmd = conda_command(argv, ns.conda_env)
+                    proc = subprocess.Popen(["bash", "-lc", cmd], cwd=workdir, stdout=stdout_handle, stderr=subprocess.STDOUT, start_new_session=True)
+                else:
+                    proc = subprocess.Popen(argv, cwd=workdir, stdout=stdout_handle, stderr=subprocess.STDOUT, start_new_session=True)
+                data = {{"workdir": ns.workdir, "log": log_path.as_posix(), "command": shlex.join(argv), "uid": os.getuid(), "pid": proc.pid, "status": "starting"}}
+                if ns.network_interface is not None:
+                    data["network_interface"] = ns.network_interface
+                if parameters is not None:
+                    data["parameters"] = parameters
+                if meta is not None:
+                    data["meta"] = meta
+                write_state(json_path, data)
+
+        if __name__ == "__main__":
+            main()
+        """
+    ).lstrip()
 
 
 def perform_local_handshake(
