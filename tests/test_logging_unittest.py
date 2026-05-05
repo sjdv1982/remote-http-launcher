@@ -363,6 +363,34 @@ class LauncherFlowTests(unittest.TestCase):
             ],
         )
 
+    def test_handle_remote_stale_state_cleans_and_launches_same_invocation(self):
+        observer = RecordingObserver()
+        cfg = make_cfg()
+        stale = {"status": "stale", "pid": 222}
+        running = {
+            "status": "running",
+            "pid": 789,
+            "port": 9100,
+            "uid": 1000,
+            "command": "echo hello",
+        }
+        remote = FakeRemote(observer, [True, False, True], [stale, running])
+        result, kind = rhl.handle_remote(cfg, remote)
+        self.assertEqual(result, running)
+        self.assertEqual(kind, "launched")
+        self.assertTrue(remote.launch_called)
+        self.assertEqual(remote.removed, 1)
+        self.assertEqual(
+            observer.phases,
+            [
+                (rhl.Phase.REMOTE_CHECK, "found:stale"),
+                (rhl.Phase.STALE_CLEANUP, "remove"),
+                (rhl.Phase.REMOTE_CHECK, "missing"),
+                (rhl.Phase.LAUNCH, "started"),
+                (rhl.Phase.WAIT_FOR_START, "waiting"),
+            ],
+        )
+
     def test_handle_remote_starting_state_cleans_up_and_retries(self):
         observer = RecordingObserver()
         cfg = make_cfg()
@@ -394,6 +422,18 @@ class LauncherFlowTests(unittest.TestCase):
                 (rhl.Phase.DONE, "reused-local"),
             ],
         )
+
+    def test_handle_local_stale_status_deletes_and_relaunches(self):
+        observer = RecordingObserver()
+        cfg = make_cfg()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_state = rhl.LocalState.build(cfg, pathlib.Path(tmpdir))
+            payload = {"hostname": "localhost", "port": 8123, "status": "stale"}
+            local_state.write(payload)
+            result = rhl.handle_local(cfg, local_state, observer)
+            self.assertIsNone(result)
+            self.assertFalse(local_state.json_path.exists())
+        self.assertEqual(observer.phases, [(rhl.Phase.LOCAL_CHECK, "stale")])
 
     def test_create_local_file_tunnel_emits_phase_and_writes_payload(self):
         observer = RecordingObserver()
