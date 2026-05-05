@@ -1515,19 +1515,27 @@ def _fallback_launch_script_source() -> str:
             except ValueError:
                 return False
 
-        def validate_status_file_args(args):
-            root = server_dir().resolve(strict=False)
+        def expand_service_arg(arg):
+            if arg == "~" or arg.startswith("~/"):
+                return pathlib.Path(arg).expanduser().as_posix()
+            return arg
+
+        def normalize_status_file_args(args):
+            normalized = [expand_service_arg(arg) for arg in args]
+            status_path = None
             i = 0
-            while i < len(args):
-                token = args[i]
+            while i < len(normalized):
+                token = normalized[i]
                 value = None
                 if token == "--status-file":
-                    if i + 1 >= len(args):
+                    if i + 1 >= len(normalized):
                         die("--status-file requires a value")
-                    value = args[i + 1]
+                    value = normalized[i + 1]
+                    value_index = i + 1
                     i += 2
                 elif token.startswith("--status-file="):
                     value = token.split("=", 1)[1]
+                    value_index = i
                     i += 1
                 else:
                     i += 1
@@ -1536,8 +1544,13 @@ def _fallback_launch_script_source() -> str:
                 p = pathlib.Path(value).expanduser()
                 if not p.is_absolute():
                     die("--status-file must be absolute")
-                if not relative_to(p.resolve(strict=False), root):
-                    die("--status-file must live under the launcher server directory")
+                expanded = p.as_posix()
+                status_path = p
+                if token == "--status-file":
+                    normalized[value_index] = expanded
+                else:
+                    normalized[value_index] = f"--status-file={{expanded}}"
+            return normalized, status_path
 
         def conda_command(argv, env_name):
             source = os.environ.get("RHL_FALLBACK_CONDA_SOURCE")
@@ -1585,12 +1598,13 @@ def _fallback_launch_script_source() -> str:
             meta = json_object(ns.meta, "--meta")
             if argv[0] not in SERVICE_BINARIES:
                 die(f"service binary is not whitelisted: {{argv[0]!r}}")
-            validate_status_file_args(argv[1:])
+            argv[1:], status_path = normalize_status_file_args(argv[1:])
             srv = server_dir()
             srv.mkdir(parents=True, exist_ok=True)
             workdir.mkdir(parents=True, exist_ok=True)
-            json_path = srv / f"{{ns.key}}.json"
-            log_path = srv / f"{{ns.key}}.log"
+            json_path = status_path if status_path is not None else srv / f"{{ns.key}}.json"
+            log_path = json_path.with_suffix(".log")
+            log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("wb", buffering=0) as stdout_handle:
                 if ns.conda_env:
                     cmd = conda_command(argv, ns.conda_env)

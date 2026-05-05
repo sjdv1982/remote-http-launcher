@@ -9,8 +9,10 @@ import socket
 import socketserver
 import importlib
 import threading
+import time
 
 import pytest
+import remote_http_launcher as rhl
 
 
 SSH_HOST = "localhost_guard"
@@ -398,6 +400,105 @@ def test_rhl_launch_service_happy_path(tmp_path: pathlib.Path) -> None:
     assert data["meta"] == {"b": 2}
     assert (server / "demo.log").exists()
     os.kill(data["pid"], signal.SIGTERM)
+
+
+def test_rhl_launch_service_expands_status_file_before_spawn(
+    tmp_path: pathlib.Path,
+) -> None:
+    rhl_dir = tmp_path / "rhl"
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    capture = tmp_path / "status-arg.txt"
+    script = _write_fake_service(
+        tmp_path / "fake-service",
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys, time\n"
+        "index = sys.argv.index('--status-file')\n"
+        "payload = '\\n'.join([sys.argv[index + 1], sys.argv[index + 3]])\n"
+        "pathlib.Path(sys.argv[index + 2]).write_text(payload, encoding='utf-8')\n"
+        "time.sleep(30)\n",
+    )
+    tools = _write_tools(tmp_path / "tools.yaml", script)
+
+    result = _run_helper(
+        tmp_path,
+        "ssh_guard.helpers.launch_service",
+        "--key",
+        "demo",
+        "--workdir",
+        workdir.as_posix(),
+        "--",
+        script.as_posix(),
+        "--status-file",
+        "~/rhl/server/demo.json",
+        capture.as_posix(),
+        "~/payload",
+        extra_env={
+            "HOME": tmp_path.as_posix(),
+            "REMOTE_HTTP_LAUNCHER_DIR": "~/rhl",
+            "RHL_TOOLS_YAML": tools.as_posix(),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads((rhl_dir / "server" / "demo.json").read_text(encoding="utf-8"))
+    try:
+        for _ in range(20):
+            if capture.exists():
+                break
+            time.sleep(0.1)
+        assert capture.read_text(encoding="utf-8").splitlines() == [
+            (rhl_dir / "server" / "demo.json").as_posix(),
+            (tmp_path / "payload").as_posix(),
+        ]
+        assert "~" not in data["command"]
+    finally:
+        os.kill(data["pid"], signal.SIGTERM)
+
+
+def test_fallback_launch_script_writes_actual_status_file(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    status_file = tmp_path / "custom-state" / "demo.json"
+    default_dir = tmp_path / "default-rhl"
+    script = _write_fake_service(tmp_path / "fake-service")
+    tools = _write_tools(tmp_path / "tools.yaml", script)
+    monkeypatch.setenv("RHL_TOOLS_YAML", tools.as_posix())
+
+    launcher = tmp_path / "launch_service.py"
+    launcher.write_text(rhl._fallback_launch_script_source(), encoding="utf-8")
+    launcher.chmod(0o700)
+    result = subprocess.run(
+        [
+            sys.executable,
+            launcher.as_posix(),
+            "--key",
+            "demo",
+            "--workdir",
+            workdir.as_posix(),
+            "--",
+            script.as_posix(),
+            "--status-file",
+            status_file.as_posix(),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=10,
+        env={**os.environ, "REMOTE_HTTP_LAUNCHER_DIR": default_dir.as_posix()},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert status_file.exists()
+    assert not (default_dir / "server" / "demo.json").exists()
+    data = json.loads(status_file.read_text(encoding="utf-8"))
+    try:
+        assert data["status"] == "starting"
+        assert data["log"] == status_file.with_suffix(".log").as_posix()
+        assert status_file.as_posix() in data["command"]
+    finally:
+        os.kill(data["pid"], signal.SIGTERM)
 
 
 @pytest.mark.parametrize(
