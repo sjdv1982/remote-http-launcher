@@ -154,6 +154,43 @@ def test_rhl_clear_removes_direct_children(tmp_path: pathlib.Path) -> None:
     assert list(root.iterdir()) == []
 
 
+def test_rhl_clear_expands_home(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "home"
+    root = home / "clearable"
+    root.mkdir(parents=True)
+    (root / "file").write_text("x", encoding="utf-8")
+    monkeypatch.setenv("HOME", home.as_posix())
+
+    result = _run_helper(tmp_path, "ssh_guard.helpers.clear", "~/clearable")
+
+    assert result.returncode == 0
+    assert list(root.iterdir()) == []
+
+
+def test_rhl_clear_skips_dot_directories_but_not_dot_files(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "clearable"
+    root.mkdir()
+    dot_dir = root / ".metadata"
+    dot_dir.mkdir()
+    (dot_dir / "kept").write_text("x", encoding="utf-8")
+    (root / ".file").write_text("x", encoding="utf-8")
+    (root / "regular").write_text("x", encoding="utf-8")
+    normal_dir = root / "normal"
+    nested_dot_dir = normal_dir / ".nested"
+    nested_dot_dir.mkdir(parents=True)
+    (nested_dot_dir / "kept").write_text("x", encoding="utf-8")
+    (normal_dir / ".dotfile").write_text("x", encoding="utf-8")
+    (normal_dir / "file").write_text("x", encoding="utf-8")
+
+    result = _run_helper(tmp_path, "ssh_guard.helpers.clear", root.as_posix())
+
+    assert result.returncode == 0
+    assert sorted(child.name for child in root.iterdir()) == [".metadata", "normal"]
+    assert (dot_dir / "kept").exists()
+    assert sorted(child.name for child in normal_dir.iterdir()) == [".nested"]
+    assert (nested_dot_dir / "kept").exists()
+
+
 def test_service_binary_loader_default_and_override(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -489,18 +526,142 @@ def test_rhl_launch_service_conda_cache_path(tmp_path: pathlib.Path) -> None:
 
 
 def test_guard_only_accepts_top_level_helpers() -> None:
-    from ssh_guard.guard import _is_allowed
+    from ssh_guard.guard import _parse_and_check
 
-    assert _is_allowed("rhl-ps")[0]
+    assert _parse_and_check("rhl-ps")[0] is not None
     for command in [
         "kill -1 999999",
         "python3 -c 'print(1)'",
         "bash -lc 'ps -p 1 -o pid='",
         "bash -lc 'cat ~/.bashrc'",
         "bash -lc \"python3 - <<'__RHL_REMOTE_SCRIPT__'\\nprint(1)\\n__RHL_REMOTE_SCRIPT__\"",
+        "'rhl-ps\n'",
     ]:
-        allowed, _reason = _is_allowed(command)
-        assert not allowed
+        args, _reason = _parse_and_check(command)
+        assert args is None
+
+
+def test_guard_requires_policy_for_path_helpers() -> None:
+    from ssh_guard.guard import _parse_and_check
+
+    for command in [
+        "rhl-clear /tmp/rhl-data",
+        "rhl-ps-persistent /tmp/rhl-data --json",
+        "rhl-launch-service --key demo --workdir /tmp/rhl-data -- /bin/true",
+    ]:
+        args, reason = _parse_and_check(command)
+        assert args is None
+        assert "path-policy" in reason
+
+
+def test_guard_permissive_policy_keeps_always_on_path_heuristics(
+    tmp_path: pathlib.Path,
+) -> None:
+    from ssh_guard.guard import _parse_and_check, _parse_policy_args
+
+    policy, error = _parse_policy_args(["--permissive-paths"])
+    assert error is None
+    assert policy is not None
+
+    args, _reason = _parse_and_check(f"rhl-clear {tmp_path.as_posix()}/data", policy)
+    assert args is not None
+
+    args, reason = _parse_and_check("rhl-clear /tmp/.cache/data", policy)
+    assert args is None
+    assert "dot-prefixed" in reason
+
+    args, reason = _parse_and_check("rhl-clear /", policy)
+    assert args is None
+    assert "system-root" in reason or "$HOME" in reason
+
+    for path in ["/dev/shm/rhl-data", "/ramdisk/rhl-data"]:
+        args, reason = _parse_and_check(f"rhl-clear {path}", policy)
+        assert args is not None, reason
+
+
+def test_guard_data_roots_policy_bounds_all_path_helpers(
+    tmp_path: pathlib.Path,
+) -> None:
+    from ssh_guard.guard import _parse_and_check, _parse_policy_args
+
+    root = tmp_path / "allowed"
+    root.mkdir()
+    roots_file = tmp_path / "roots.txt"
+    roots_file.write_text(f"# comment\n{root.as_posix()}\n", encoding="utf-8")
+    policy, error = _parse_policy_args(["--data-roots", roots_file.as_posix()])
+    assert error is None
+    assert policy is not None
+
+    inside = root / "project"
+    outside = tmp_path / "outside"
+    for command in [
+        f"rhl-clear {inside.as_posix()}",
+        f"rhl-ps-persistent {inside.as_posix()} --level 1 --json",
+        f"rhl-launch-service --key demo --workdir {inside.as_posix()} -- /bin/true",
+    ]:
+        args, reason = _parse_and_check(command, policy)
+        assert args is not None, reason
+
+    args, reason = _parse_and_check(f"rhl-clear {outside.as_posix()}", policy)
+    assert args is None
+    assert "outside configured --data-roots" in reason
+
+
+def test_guard_data_roots_policy_allows_custom_top_level_roots(
+    tmp_path: pathlib.Path,
+) -> None:
+    from ssh_guard.guard import _parse_and_check, _parse_policy_args
+
+    roots_file = tmp_path / "roots.txt"
+    roots_file.write_text("/ramdisk\n/dev/shm\n", encoding="utf-8")
+    policy, error = _parse_policy_args(["--data-roots", roots_file.as_posix()])
+    assert error is None
+    assert policy is not None
+
+    for path in ["/ramdisk/project", "/dev/shm/project"]:
+        args, reason = _parse_and_check(f"rhl-clear {path}", policy)
+        assert args is not None, reason
+
+
+def test_guard_marker_policy_applies_to_clear_paths_but_not_workdir(
+    tmp_path: pathlib.Path,
+) -> None:
+    from ssh_guard.guard import _parse_and_check, _parse_policy_args
+
+    policy, error = _parse_policy_args(["--clear-policy", "marker:.rhl-clearable"])
+    assert error is None
+    assert policy is not None
+    clearable = tmp_path / "clearable"
+    clearable.mkdir()
+    (clearable / ".rhl-clearable").write_text("", encoding="utf-8")
+    unmarked = tmp_path / "unmarked"
+    unmarked.mkdir()
+
+    args, reason = _parse_and_check(f"rhl-clear {clearable.as_posix()}", policy)
+    assert args is not None, reason
+
+    args, reason = _parse_and_check(f"rhl-ps-persistent {unmarked.as_posix()} --json", policy)
+    assert args is None
+    assert "required marker" in reason
+
+    args, reason = _parse_and_check(
+        f"rhl-launch-service --key demo --workdir {unmarked.as_posix()} -- /bin/true",
+        policy,
+    )
+    assert args is not None, reason
+
+
+def test_guard_rejects_conflicting_path_policy_options(tmp_path: pathlib.Path) -> None:
+    from ssh_guard.guard import _parse_policy_args
+
+    roots_file = tmp_path / "roots.txt"
+    roots_file.write_text(f"{tmp_path.as_posix()}\n", encoding="utf-8")
+    policy, error = _parse_policy_args(
+        ["--data-roots", roots_file.as_posix(), "--permissive-paths"]
+    )
+    assert policy is None
+    assert error is not None
+    assert "mutually exclusive" in error
 
 
 def test_rhl_ps_persistent_file_modes(tmp_path: pathlib.Path) -> None:
@@ -523,6 +684,45 @@ def test_rhl_ps_persistent_file_modes(tmp_path: pathlib.Path) -> None:
     assert result.returncode == 0
     assert '"state": "populated"' in result.stdout
     assert '"size": 2' in result.stdout
+
+
+def test_rhl_ps_persistent_expands_home(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "home"
+    root = home / "persistent"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("HOME", home.as_posix())
+
+    result = _run_helper(tmp_path, "ssh_guard.helpers.ps_persistent", "~/persistent", "--json")
+
+    assert result.returncode == 0
+    row = json.loads(result.stdout)
+    assert row["path"] == root.as_posix()
+    assert row["state"] == "empty"
+
+
+def test_rhl_ps_persistent_marker_filters_reported_directories(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "persistent"
+    project = root / "project"
+    bucket = project / "aa"
+    bucket.mkdir(parents=True)
+    (project / ".HASHSERVER_PREFIX").write_text("", encoding="utf-8")
+    (bucket / "payload").write_text("data", encoding="utf-8")
+
+    result = _run_helper(
+        tmp_path,
+        "ssh_guard.helpers.ps_persistent",
+        root.as_posix(),
+        "--level",
+        "2",
+        "--marker",
+        ".HASHSERVER_PREFIX",
+        "--json",
+    )
+
+    assert result.returncode == 0
+    rows = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [row["path"] for row in rows] == [project.as_posix()]
+    assert rows[0]["state"] == "populated"
 
 
 @pytest.mark.parametrize(

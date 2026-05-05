@@ -9,14 +9,27 @@ import sys
 from ssh_guard._cli import die, emit_ndjson, handle_help, parse_int_flag, print_table
 from ssh_guard._state import validate_clearable_path
 
-USAGE = "rhl-ps-persistent <path> [<path>...] [--level N] [--file FILENAME] [--json]"
+USAGE = "rhl-ps-persistent <path> [<path>...] [--level N] [--file FILENAME] [--marker FILENAME] [--json]"
 DESCRIPTION = "Walk absolute, validated paths and report absent, empty, or populated state."
 
 
-def _parse(args: list[str]) -> tuple[list[pathlib.Path], int, str | None, bool]:
+def _pop_filename_flag(args: list[str], flag: str) -> str | None:
+    if flag not in args:
+        return None
+    index = args.index(flag)
+    try:
+        filename = args[index + 1]
+    except IndexError:
+        die("rhl-ps-persistent", f"{flag} requires a filename")
+    if "/" in filename or filename in ("", ".", ".."):
+        die("rhl-ps-persistent", f"{flag} requires a simple filename")
+    del args[index:index + 2]
+    return filename
+
+
+def _parse(args: list[str]) -> tuple[list[pathlib.Path], int, str | None, str | None, bool]:
     handle_help(args, USAGE, DESCRIPTION)
     json_mode = False
-    filename = None
     if "--json" in args:
         args.remove("--json")
         json_mode = True
@@ -25,18 +38,12 @@ def _parse(args: list[str]) -> tuple[list[pathlib.Path], int, str | None, bool]:
         level = 0
     if level < 0:
         die("rhl-ps-persistent", "--level must be >= 0")
-    if "--file" in args:
-        index = args.index("--file")
-        try:
-            filename = args[index + 1]
-        except IndexError:
-            die("rhl-ps-persistent", "--file requires a filename")
-        if "/" in filename or filename in ("", ".", ".."):
-            die("rhl-ps-persistent", "--file requires a simple filename")
-        del args[index:index + 2]
+    filename = _pop_filename_flag(args, "--file")
+    marker = _pop_filename_flag(args, "--marker")
     if not args:
         die("rhl-ps-persistent", "at least one path is required")
-    return [validate_clearable_path(arg) for arg in args], level, filename, json_mode
+    roots = [validate_clearable_path(str(pathlib.Path(arg).expanduser())) for arg in args]
+    return roots, level, filename, marker, json_mode
 
 
 def _mtime(path: pathlib.Path) -> str | None:
@@ -46,7 +53,7 @@ def _mtime(path: pathlib.Path) -> str | None:
         return None
 
 
-def _row(path: pathlib.Path, filename: str | None) -> dict:
+def _row(path: pathlib.Path, filename: str | None, marker: str | None) -> dict:
     if not path.exists():
         return {"path": path.as_posix(), "state": "absent", "size": None, "modified": None}
     if not path.is_dir():
@@ -56,7 +63,7 @@ def _row(path: pathlib.Path, filename: str | None) -> dict:
         populated = target.exists()
     else:
         try:
-            populated = any(path.iterdir())
+            populated = any(child.name != marker for child in path.iterdir())
         except OSError as exc:
             die("rhl-ps-persistent", f"could not read {path}: {exc}")
     if not populated:
@@ -75,8 +82,10 @@ def _row(path: pathlib.Path, filename: str | None) -> dict:
     return {"path": path.as_posix(), "state": "populated", "size": None, "modified": _mtime(path)}
 
 
-def _walk(root: pathlib.Path, level: int, filename: str | None) -> list[dict]:
-    rows = [_row(root, filename)]
+def _walk(root: pathlib.Path, level: int, filename: str | None, marker: str | None) -> list[dict]:
+    rows = []
+    if marker is None or not root.exists() or (root / marker).exists():
+        rows.append(_row(root, filename, marker))
     if level == 0 or not root.exists():
         return rows
     if not root.is_dir():
@@ -86,15 +95,15 @@ def _walk(root: pathlib.Path, level: int, filename: str | None) -> list[dict]:
     except OSError as exc:
         die("rhl-ps-persistent", f"could not read {root}: {exc}")
     for child in children:
-        rows.extend(_walk(child, level - 1, filename))
+        rows.extend(_walk(child, level - 1, filename, marker))
     return rows
 
 
 def main() -> None:
-    roots, level, filename, json_mode = _parse(sys.argv[1:])
+    roots, level, filename, marker, json_mode = _parse(sys.argv[1:])
     rows: list[dict] = []
     for root in roots:
-        rows.extend(_walk(root, level, filename))
+        rows.extend(_walk(root, level, filename, marker))
     if json_mode:
         emit_ndjson(rows)
     else:
