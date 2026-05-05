@@ -2,6 +2,13 @@ import pathlib
 import subprocess
 import sys
 import json
+import http.server
+import os
+import signal
+import socket
+import socketserver
+import importlib
+import threading
 
 import pytest
 
@@ -68,8 +75,16 @@ def test_guard_rejects_interactive_sessions() -> None:
     assert "this program is an SSH guard" in result.stderr
 
 
-def _run_helper(tmp_path: pathlib.Path, module: str, *args: str) -> subprocess.CompletedProcess[str]:
-    env = {"REMOTE_HTTP_LAUNCHER_DIR": tmp_path.as_posix()}
+def _run_helper(
+    tmp_path: pathlib.Path,
+    module: str,
+    *args: str,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["REMOTE_HTTP_LAUNCHER_DIR"] = tmp_path.as_posix()
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [sys.executable, "-m", module, *args],
         text=True,
@@ -139,6 +154,355 @@ def test_rhl_clear_removes_direct_children(tmp_path: pathlib.Path) -> None:
     assert list(root.iterdir()) == []
 
 
+def test_service_binary_loader_default_and_override(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    yaml_module = sys.modules.get("yaml")
+    if yaml_module is not None and not hasattr(yaml_module, "__file__"):
+        sys.modules.pop("yaml")
+    real_yaml = importlib.import_module("yaml")
+    from ssh_guard import _tools
+
+    _tools.yaml = real_yaml
+    load_service_binaries = _tools.load_service_binaries
+
+    monkeypatch.delenv("RHL_TOOLS_YAML", raising=False)
+    default_binaries = load_service_binaries()
+    assert {"hashserver", "seamless-jobserver", "seamless-dask-wrapper"} <= default_binaries
+
+    tools = tmp_path / "tools.yaml"
+    tools.write_text(
+        "demo:\n  command_template: /tmp/demo --status-file {status_file}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("RHL_TOOLS_YAML", tools.as_posix())
+    assert load_service_binaries() == frozenset({"/tmp/demo"})
+
+    tools.write_text("[]\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        load_service_binaries()
+
+    tools.write_text("demo:\n  command_template: ''\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        load_service_binaries()
+
+
+def test_rhl_pid_alive(tmp_path: pathlib.Path) -> None:
+    result = _run_helper(tmp_path, "ssh_guard.helpers.pid_alive", str(os.getpid()))
+    assert result.returncode == 0
+
+    result = _run_helper(tmp_path, "ssh_guard.helpers.pid_alive", "999999999")
+    assert result.returncode == 1
+
+    for raw in ["nope", "0", "-1"]:
+        result = _run_helper(tmp_path, "ssh_guard.helpers.pid_alive", raw)
+        assert result.returncode != 0
+
+
+def test_rhl_conda_info(tmp_path: pathlib.Path) -> None:
+    (tmp_path / "conda-setup.json").write_text('{"conda_source": null}', encoding="utf-8")
+    result = _run_helper(tmp_path, "ssh_guard.helpers.conda_info")
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {"conda_source": None}
+
+    (tmp_path / "conda-setup.json").unlink()
+    result = _run_helper(tmp_path, "ssh_guard.helpers.conda_info")
+    assert result.returncode == 1
+
+    (tmp_path / "conda-setup.json").write_text("{", encoding="utf-8")
+    result = _run_helper(tmp_path, "ssh_guard.helpers.conda_info")
+    assert result.returncode == 1
+
+    (tmp_path / "conda-setup.json").write_text("[1]", encoding="utf-8")
+    result = _run_helper(tmp_path, "ssh_guard.helpers.conda_info")
+    assert result.returncode == 1
+
+    (tmp_path / "conda-setup.json").write_text('"x"', encoding="utf-8")
+    result = _run_helper(tmp_path, "ssh_guard.helpers.conda_info")
+    assert result.returncode == 1
+
+
+def test_rhl_inspect_with_mtime(tmp_path: pathlib.Path) -> None:
+    server = tmp_path / "server"
+    server.mkdir()
+    (server / "demo.json").write_text('{"status": "running"}', encoding="utf-8")
+
+    result = _run_helper(tmp_path, "ssh_guard.helpers.inspect", "demo", "--with-mtime")
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert isinstance(payload["mtime"], float)
+    assert payload["data"] == {"status": "running"}
+
+
+class _StatusHandler(http.server.BaseHTTPRequestHandler):
+    status = 200
+
+    def do_GET(self) -> None:
+        self.send_response(self.status)
+        self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+def _serve_status(status: int):
+    handler = type("Handler", (_StatusHandler,), {"status": status})
+    server = socketserver.TCPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def test_rhl_handshake_status_codes(tmp_path: pathlib.Path) -> None:
+    server = _serve_status(200)
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/health"
+        result = _run_helper(tmp_path, "ssh_guard.helpers.handshake", url)
+        assert result.returncode == 0
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    server = _serve_status(500)
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/health"
+        result = _run_helper(tmp_path, "ssh_guard.helpers.handshake", url)
+        assert result.returncode == 2
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    result = _run_helper(tmp_path, "ssh_guard.helpers.handshake", "file:///tmp/x")
+    assert result.returncode != 0
+
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    closed_port = closed.getsockname()[1]
+    closed.close()
+    result = _run_helper(
+        tmp_path,
+        "ssh_guard.helpers.handshake",
+        f"http://127.0.0.1:{closed_port}/health",
+    )
+    assert result.returncode == 1
+
+
+def test_rhl_verify_port(tmp_path: pathlib.Path) -> None:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    try:
+        port = listener.getsockname()[1]
+        result = _run_helper(tmp_path, "ssh_guard.helpers.verify_port", "127.0.0.1", str(port))
+        assert result.returncode == 0
+    finally:
+        listener.close()
+
+    result = _run_helper(tmp_path, "ssh_guard.helpers.verify_port", "bad host", "80")
+    assert result.returncode != 0
+
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    closed_port = closed.getsockname()[1]
+    closed.close()
+    result = _run_helper(tmp_path, "ssh_guard.helpers.verify_port", "127.0.0.1", str(closed_port))
+    assert result.returncode == 1
+
+    for port in ["0", "65536", "nope"]:
+        result = _run_helper(tmp_path, "ssh_guard.helpers.verify_port", "127.0.0.1", port)
+        assert result.returncode != 0
+
+
+def _write_fake_service(path: pathlib.Path, content: str = "#!/usr/bin/env sh\nsleep 30\n") -> pathlib.Path:
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o700)
+    return path
+
+
+def _write_tools(path: pathlib.Path, binary: pathlib.Path) -> pathlib.Path:
+    path.write_text(
+        f"fake:\n  command_template: {binary.as_posix()} --status-file {{status_file}}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_rhl_launch_service_happy_path(tmp_path: pathlib.Path) -> None:
+    server = tmp_path / "server"
+    server.mkdir()
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    script = _write_fake_service(tmp_path / "fake-service")
+    tools = _write_tools(tmp_path / "tools.yaml", script)
+
+    result = _run_helper(
+        tmp_path,
+        "ssh_guard.helpers.launch_service",
+        "--key",
+        "demo",
+        "--workdir",
+        workdir.as_posix(),
+        "--parameters",
+        '{"a": 1}',
+        "--meta",
+        '{"b": 2}',
+        "--",
+        script.as_posix(),
+        "--status-file",
+        (server / "demo.json").as_posix(),
+        extra_env={"RHL_TOOLS_YAML": tools.as_posix()},
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads((server / "demo.json").read_text(encoding="utf-8"))
+    assert data["status"] == "starting"
+    assert data["parameters"] == {"a": 1}
+    assert data["meta"] == {"b": 2}
+    assert (server / "demo.log").exists()
+    os.kill(data["pid"], signal.SIGTERM)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--key", "bad/key"],
+        ["--key", "demo", "--workdir", "/"],
+        ["--key", "demo", "--workdir", "/tmp/../tmp"],
+        ["--key", "demo", "--parameters", "{"],
+        ["--key", "demo", "--parameters", "[]"],
+        ["--key", "demo", "--meta", "{"],
+        ["--key", "demo", "--meta", "[]"],
+    ],
+)
+def test_rhl_launch_service_rejects_bad_inputs(
+    tmp_path: pathlib.Path, args: list[str]
+) -> None:
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    script = _write_fake_service(tmp_path / "fake-service")
+    tools = _write_tools(tmp_path / "tools.yaml", script)
+    normalized_args = [
+        value if value != "/tmp/../tmp" else (tmp_path / ".." / tmp_path.name).as_posix()
+        for value in args
+    ]
+    if "--workdir" not in normalized_args:
+        normalized_args += ["--workdir", workdir.as_posix()]
+
+    result = _run_helper(
+        tmp_path,
+        "ssh_guard.helpers.launch_service",
+        *normalized_args,
+        "--",
+        script.as_posix(),
+        "--status-file",
+        (tmp_path / "server" / "demo.json").as_posix(),
+        extra_env={"RHL_TOOLS_YAML": tools.as_posix()},
+    )
+
+    assert result.returncode != 0
+
+
+def test_rhl_launch_service_rejects_service_argv_and_status_file_escape(
+    tmp_path: pathlib.Path,
+) -> None:
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    script = _write_fake_service(tmp_path / "fake-service")
+    tools = _write_tools(tmp_path / "tools.yaml", script)
+
+    result = _run_helper(
+        tmp_path,
+        "ssh_guard.helpers.launch_service",
+        "--key",
+        "demo",
+        "--workdir",
+        workdir.as_posix(),
+        extra_env={"RHL_TOOLS_YAML": tools.as_posix()},
+    )
+    assert result.returncode != 0
+
+    result = _run_helper(
+        tmp_path,
+        "ssh_guard.helpers.launch_service",
+        "--key",
+        "demo",
+        "--workdir",
+        workdir.as_posix(),
+        "--",
+        "/bin/sh",
+        "-c",
+        "sleep 30",
+        extra_env={"RHL_TOOLS_YAML": tools.as_posix()},
+    )
+    assert result.returncode != 0
+
+    result = _run_helper(
+        tmp_path,
+        "ssh_guard.helpers.launch_service",
+        "--key",
+        "demo",
+        "--workdir",
+        workdir.as_posix(),
+        "--",
+        script.as_posix(),
+        "--status-file",
+        (tmp_path / "escape.json").as_posix(),
+        extra_env={"RHL_TOOLS_YAML": tools.as_posix()},
+    )
+    assert result.returncode != 0
+
+
+def test_rhl_launch_service_conda_cache_path(tmp_path: pathlib.Path) -> None:
+    server = tmp_path / "server"
+    server.mkdir()
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    script = _write_fake_service(tmp_path / "fake-service")
+    tools = _write_tools(tmp_path / "tools.yaml", script)
+    conda_source = tmp_path / "conda.sh"
+    conda_source.write_text("conda() { return 0; }\n", encoding="utf-8")
+    (tmp_path / "conda-setup.json").write_text(
+        json.dumps({"conda_source": conda_source.as_posix()}),
+        encoding="utf-8",
+    )
+
+    result = _run_helper(
+        tmp_path,
+        "ssh_guard.helpers.launch_service",
+        "--key",
+        "demo",
+        "--workdir",
+        workdir.as_posix(),
+        "--conda-env",
+        "demo-env",
+        "--",
+        script.as_posix(),
+        "--status-file",
+        (server / "demo.json").as_posix(),
+        extra_env={"RHL_TOOLS_YAML": tools.as_posix()},
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads((server / "demo.json").read_text(encoding="utf-8"))
+    os.kill(data["pid"], signal.SIGTERM)
+
+
+def test_guard_only_accepts_top_level_helpers() -> None:
+    from ssh_guard.guard import _is_allowed
+
+    assert _is_allowed("rhl-ps")[0]
+    for command in [
+        "kill -1 999999",
+        "python3 -c 'print(1)'",
+        "bash -lc 'ps -p 1 -o pid='",
+        "bash -lc 'cat ~/.bashrc'",
+        "bash -lc \"python3 - <<'__RHL_REMOTE_SCRIPT__'\\nprint(1)\\n__RHL_REMOTE_SCRIPT__\"",
+    ]:
+        allowed, _reason = _is_allowed(command)
+        assert not allowed
+
+
 def test_rhl_ps_persistent_file_modes(tmp_path: pathlib.Path) -> None:
     root = tmp_path / "persistent"
     root.mkdir()
@@ -165,6 +529,11 @@ def test_rhl_ps_persistent_file_modes(tmp_path: pathlib.Path) -> None:
     "module",
     [
         "ssh_guard.helpers.cache_conda",
+        "ssh_guard.helpers.conda_info",
+        "ssh_guard.helpers.pid_alive",
+        "ssh_guard.helpers.handshake",
+        "ssh_guard.helpers.verify_port",
+        "ssh_guard.helpers.launch_service",
         "ssh_guard.helpers.ps",
         "ssh_guard.helpers.ps_persistent",
         "ssh_guard.helpers.stop",
