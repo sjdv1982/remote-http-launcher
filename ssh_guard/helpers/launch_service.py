@@ -48,20 +48,29 @@ def _is_relative_to(path: pathlib.Path, parent: pathlib.Path) -> bool:
         return False
 
 
-def _validate_status_file_args(args: list[str]) -> None:
+def _expand_service_arg(arg: str) -> str:
+    if arg == "~" or arg.startswith("~/"):
+        return pathlib.Path(arg).expanduser().as_posix()
+    return arg
+
+
+def _normalize_status_file_args(args: list[str]) -> list[str]:
+    normalized = [_expand_service_arg(arg) for arg in args]
     root = server_dir().expanduser()
     root_resolved = root.resolve(strict=False)
     index = 0
-    while index < len(args):
-        token = args[index]
+    while index < len(normalized):
+        token = normalized[index]
         value: str | None = None
         if token == "--status-file":
-            if index + 1 >= len(args):
+            if index + 1 >= len(normalized):
                 _die("--status-file requires a value")
-            value = args[index + 1]
+            value = normalized[index + 1]
+            value_index = index + 1
             index += 2
         elif token.startswith("--status-file="):
             value = token.split("=", 1)[1]
+            value_index = index
             index += 1
         else:
             index += 1
@@ -73,6 +82,12 @@ def _validate_status_file_args(args: list[str]) -> None:
         resolved = status_path.resolve(strict=False)
         if not _is_relative_to(resolved, root_resolved):
             _die("--status-file must live under the launcher server directory")
+        expanded = status_path.as_posix()
+        if token == "--status-file":
+            normalized[value_index] = expanded
+        else:
+            normalized[value_index] = f"--status-file={expanded}"
+    return normalized
 
 
 def _read_conda_cache() -> dict[str, Any]:
@@ -168,7 +183,7 @@ def main() -> None:
     binary = service_argv[0]
     if binary not in load_service_binaries():
         _die(f"service binary is not whitelisted: {binary!r}")
-    _validate_status_file_args(service_argv[1:])
+    service_argv[1:] = _normalize_status_file_args(service_argv[1:])
 
     srv_dir = server_dir()
     srv_dir.mkdir(parents=True, exist_ok=True)
