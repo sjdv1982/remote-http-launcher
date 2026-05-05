@@ -57,7 +57,7 @@ def validate_cluster(cluster: str) -> None:
 
 # System directories that must never be cleared
 _FORBIDDEN_ROOTS = {"/", "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64",
-                    "/boot", "/sys", "/proc", "/dev", "/run", "/var", "/opt"}
+                    "/boot", "/sys", "/proc", "/run", "/var", "/opt"}
 
 
 def validate_clearable_path(path: str) -> pathlib.Path:

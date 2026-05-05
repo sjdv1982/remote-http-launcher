@@ -86,7 +86,7 @@ the following is true:
     out-of-band metadata and are never legitimate launcher workdirs.
   * The path resolves to one of the system-root directories: '/',
     '/etc', '/usr', '/bin', '/sbin', '/lib', '/lib64', '/boot',
-    '/sys', '/proc', '/dev', '/run', '/var', '/opt'.
+    '/sys', '/proc', '/run', '/var', '/opt'.
 
 In addition, rhl-clear skips any direct child whose name begins with
 '.' while iterating, even when the parent directory itself was
@@ -134,11 +134,220 @@ import pathlib
 import re
 import shlex
 import sys
+from dataclasses import dataclass
 
 _HELPER_RE = re.compile(r"rhl-[a-z][a-z-]*\Z")
+_PATH_HELPERS = {"rhl-clear", "rhl-ps-persistent", "rhl-launch-service"}
+_FORBIDDEN_ROOTS = {
+    "/",
+    "/etc",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    "/boot",
+    "/sys",
+    "/proc",
+    "/run",
+    "/var",
+    "/opt",
+}
+_POLICY_HELP = (
+    "configure rhl-guard with one path-policy flag: --data-roots PATH, "
+    "--clear-policy seamless, --clear-policy marker:NAME, or --permissive-paths; "
+    "see the rhl-guard docstring / README Path policy section"
+)
 
 
-def _parse_and_check(command: str) -> tuple[list[str] | None, str]:
+@dataclass(frozen=True)
+class _PathPolicy:
+    mode: str
+    roots: tuple[pathlib.Path, ...] = ()
+    marker_names: tuple[str, ...] = ()
+
+
+def _is_relative_to(path: pathlib.Path, parent: pathlib.Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve(path: pathlib.Path) -> pathlib.Path:
+    try:
+        return path.resolve(strict=False)
+    except OSError:
+        return path
+
+
+def _has_dot_segment(path: pathlib.Path) -> bool:
+    return any(part not in (path.anchor, os.sep) and part.startswith(".") for part in path.parts)
+
+
+def _simple_filename(name: str) -> bool:
+    return name not in ("", ".", "..") and "/" not in name and "\\" not in name
+
+
+def _read_data_roots(path: str) -> tuple[pathlib.Path, ...]:
+    roots_path = pathlib.Path(path).expanduser()
+    try:
+        lines = roots_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ValueError(f"could not read --data-roots file {path!r}: {exc}") from exc
+
+    roots: list[pathlib.Path] = []
+    for lineno, line in enumerate(lines, start=1):
+        raw = line.strip()
+        if not raw or raw.startswith("#"):
+            continue
+        root = pathlib.Path(raw).expanduser()
+        if not root.is_absolute():
+            raise ValueError(f"--data-roots entry on line {lineno} is not absolute after ~ expansion: {raw!r}")
+        roots.append(_resolve(root))
+    if not roots:
+        raise ValueError("--data-roots file does not contain any usable roots")
+    return tuple(roots)
+
+
+def _parse_policy_args(argv: list[str]) -> tuple[_PathPolicy | None, str | None]:
+    data_roots: str | None = None
+    clear_policy: str | None = None
+    permissive = False
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--permissive-paths":
+            permissive = True
+            index += 1
+        elif arg == "--data-roots":
+            if index + 1 >= len(argv):
+                return None, "--data-roots requires a path"
+            data_roots = argv[index + 1]
+            index += 2
+        elif arg.startswith("--data-roots="):
+            data_roots = arg.split("=", 1)[1]
+            index += 1
+        elif arg == "--clear-policy":
+            if index + 1 >= len(argv):
+                return None, "--clear-policy requires a value"
+            clear_policy = argv[index + 1]
+            index += 2
+        elif arg.startswith("--clear-policy="):
+            clear_policy = arg.split("=", 1)[1]
+            index += 1
+        else:
+            return None, f"unknown rhl-guard option: {arg}"
+
+    selected = sum(value is not None for value in (data_roots, clear_policy)) + int(permissive)
+    if selected == 0:
+        return None, None
+    if selected > 1:
+        return None, "--data-roots, --clear-policy, and --permissive-paths are mutually exclusive"
+
+    if permissive:
+        return _PathPolicy("permissive"), None
+    if data_roots is not None:
+        try:
+            roots = _read_data_roots(data_roots)
+        except ValueError as exc:
+            return None, str(exc)
+        return _PathPolicy("data_roots", roots=roots), None
+    assert clear_policy is not None
+    if clear_policy == "seamless":
+        return _PathPolicy("marker", marker_names=("seamless.db", ".HASHSERVER_PREFIX")), None
+    if clear_policy.startswith("marker:"):
+        marker = clear_policy.split(":", 1)[1]
+        if not _simple_filename(marker):
+            return None, "--clear-policy marker:NAME requires a simple marker filename"
+        return _PathPolicy("marker", marker_names=(marker,)), None
+    return None, "--clear-policy must be 'seamless' or 'marker:NAME'"
+
+
+def _extract_guarded_paths(args: list[str]) -> tuple[list[tuple[str, pathlib.Path]], str | None]:
+    helper = args[0]
+    values: list[tuple[str, pathlib.Path]] = []
+    if helper == "rhl-clear":
+        if len(args) >= 2:
+            values.append(("clear", pathlib.Path(args[1]).expanduser()))
+        return values, None
+    if helper == "rhl-launch-service":
+        index = 1
+        while index < len(args):
+            arg = args[index]
+            if arg == "--":
+                break
+            if arg == "--workdir":
+                if index + 1 >= len(args):
+                    return values, "rhl-launch-service --workdir requires a path"
+                values.append(("workdir", pathlib.Path(args[index + 1]).expanduser()))
+                index += 2
+            elif arg.startswith("--workdir="):
+                values.append(("workdir", pathlib.Path(arg.split("=", 1)[1]).expanduser()))
+                index += 1
+            else:
+                index += 1
+        return values, None
+    if helper == "rhl-ps-persistent":
+        index = 1
+        while index < len(args):
+            arg = args[index]
+            if arg in ("--json",):
+                index += 1
+            elif arg in ("--level", "--file", "--marker"):
+                if index + 1 >= len(args):
+                    return values, f"rhl-ps-persistent {arg} requires a value"
+                index += 2
+            elif arg.startswith("--level=") or arg.startswith("--file=") or arg.startswith("--marker="):
+                index += 1
+            elif arg.startswith("-"):
+                index += 1
+            else:
+                values.append(("clear", pathlib.Path(arg).expanduser()))
+                index += 1
+        return values, None
+    return values, None
+
+
+def _check_heuristics(path: pathlib.Path) -> str | None:
+    if not path.is_absolute():
+        return f"path must be absolute after ~ expansion: {path}"
+    resolved = _resolve(path)
+    home = _resolve(pathlib.Path.home())
+    if resolved == home or _is_relative_to(home, resolved):
+        return f"path must not be $HOME or an ancestor of $HOME: {path}"
+    if _has_dot_segment(path) or _has_dot_segment(resolved):
+        return f"path must not contain dot-prefixed segments: {path}"
+    if resolved.as_posix() in _FORBIDDEN_ROOTS:
+        return f"refusing system-root directory: {path}"
+    return None
+
+
+def _check_path_policy(args: list[str], policy: _PathPolicy | None) -> str | None:
+    if args[0] not in _PATH_HELPERS:
+        return None
+    if policy is None:
+        return _POLICY_HELP
+    guarded_paths, error = _extract_guarded_paths(args)
+    if error is not None:
+        return error
+    for kind, path in guarded_paths:
+        error = _check_heuristics(path)
+        if error is not None:
+            return error
+        resolved = _resolve(path)
+        if policy.mode == "data_roots":
+            if not any(resolved == root or _is_relative_to(resolved, root) for root in policy.roots):
+                return f"path is outside configured --data-roots: {path}"
+        elif policy.mode == "marker" and kind == "clear":
+            if not any((resolved / marker).is_file() for marker in policy.marker_names):
+                markers = ", ".join(policy.marker_names)
+                return f"path does not contain required marker file ({markers}): {path}"
+    return None
+
+
+def _parse_and_check(command: str, policy: _PathPolicy | None = None) -> tuple[list[str] | None, str]:
     if not command.strip():
         return None, "empty command (interactive session not allowed)"
     try:
@@ -149,24 +358,32 @@ def _parse_and_check(command: str) -> tuple[list[str] | None, str]:
         return None, "empty command"
     if not _HELPER_RE.fullmatch(parts[0]):
         return None, f"command not in whitelist: {command[:120]!r}"
+    policy_error = _check_path_policy(parts, policy)
+    if policy_error is not None:
+        return None, policy_error
     return parts, "rhl helper"
 
 
 def main() -> None:
+    policy, error = _parse_policy_args(sys.argv[1:])
+    if error is not None:
+        print(f"rhl-guard: configuration error: {error}", file=sys.stderr)
+        sys.exit(1)
+
     command = os.environ.get("SSH_ORIGINAL_COMMAND", "")
     if not command:
         print(
             "rhl-guard: this program is an SSH guard for remote-http-launcher.\n"
             "It must be invoked via SSH, not run directly.\n\n"
             "To install, add to ~/.ssh/authorized_keys on the remote server:\n"
-            '    command="rhl-guard" ssh-rsa AAAA... your-key-comment\n\n'
+            '    command="rhl-guard --data-roots /path/to/data-roots" ssh-rsa AAAA... your-key-comment\n\n'
             "To test a specific command:\n"
-            '    SSH_ORIGINAL_COMMAND="rhl-ps" rhl-guard',
+            '    SSH_ORIGINAL_COMMAND="rhl-ps" rhl-guard --permissive-paths',
             file=sys.stderr,
         )
         sys.exit(1)
 
-    args, reason = _parse_and_check(command)
+    args, reason = _parse_and_check(command, policy)
     if args is None:
         print(f"rhl-guard: rejected: {reason}", file=sys.stderr)
         sys.exit(1)

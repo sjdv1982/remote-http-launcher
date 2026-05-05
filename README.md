@@ -170,8 +170,8 @@ dispatch if any path it extracts from the SSH command is:
 - containing any segment that begins with `.` (e.g. `~/.ssh`,
   `/tmp/.cache/foo`); or
 - resolved to one of the system-root directories (`/`, `/etc`, `/usr`,
-  `/bin`, `/sbin`, `/lib`, `/lib64`, `/boot`, `/sys`, `/proc`, `/dev`,
-  `/run`, `/var`, `/opt`).
+  `/bin`, `/sbin`, `/lib`, `/lib64`, `/boot`, `/sys`, `/proc`, `/run`,
+  `/var`, `/opt`).
 
 These are guard-side checks applied *before* the helper is `exec`'d.
 They are independent of, and additional to, the helper's own existing
