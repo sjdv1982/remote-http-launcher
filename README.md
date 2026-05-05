@@ -125,12 +125,93 @@ The guard whitelist covers only top-level `rhl-*` helper commands installed by t
 Direct process-management commands such as `kill -1 <pid>` are rejected by
 the guard. Use helpers such as `rhl-stop <key>` instead.
 
+### Path policy
+
+Three of the helpers — `rhl-clear`, `rhl-ps-persistent`, and
+`rhl-launch-service` (the `--workdir` argument) — accept filesystem paths
+chosen by the SSH client. Without bounding which paths the client may
+supply, a stolen SSH key with `command="rhl-guard"` would still reach
+helpers that destroy or probe arbitrary directories.
+
+> **Path policy is enforced entirely by `rhl-guard`. The `rhl-*` helpers
+> are not modified.** They behave identically to previous versions when
+> invoked directly — locally on the server, via tests, or in any
+> client-side context (`rhl-ps`, `rhl-rm --client`, etc.). The guard is
+> the single point that parses `SSH_ORIGINAL_COMMAND`, identifies any
+> path arguments destined for the three helpers above, validates those
+> paths against the configured policy, and only then `exec`s the helper.
+> Direct invocations bypass `rhl-guard` entirely and are *unaffected*
+> by the policy.
+
+The policy is declared via one of the following mutually-exclusive flags
+on `rhl-guard` in the `authorized_keys` `command=` directive:
+
+| Flag | Effect | When to use |
+|------|--------|-------------|
+| `--data-roots /path/to/roots-file` | **Strict allowlist.** Each path the guard extracts from the SSH command must, after `~`-expansion and symlink resolution, equal or live under one of the absolute paths listed in the file. One path per line; blank lines and `#` comments are ignored. The same list governs `rhl-clear`, `rhl-ps-persistent`, and `rhl-launch-service --workdir`. | Recommended for production. Fully explicit; no heuristics. |
+| `--clear-policy seamless` | **Marker preset for Seamless.** The guard accepts a target directory for `rhl-clear` and `rhl-ps-persistent` only if it contains either a `seamless.db` file or a `.HASHSERVER_PREFIX` file. `rhl-launch-service --workdir` is checked against the always-on heuristics only (since a workdir that has not yet been created cannot contain a marker). No allowlist file required. | Seamless deployments. |
+| `--clear-policy marker:NAME` | **Generic marker.** Same shape as the `seamless` preset, but the marker filename is configurable. Drop `touch <dir>/<NAME>` into each directory you wish to authorise. | Non-Seamless deployments that prefer per-directory markers over a central allowlist. |
+| `--permissive-paths` | **Disables the policy.** The guard accepts any path that passes the always-on heuristics below. | Compatibility for deployments that cannot configure any of the modes above. **Not recommended.** Mutually exclusive with `--data-roots` and `--clear-policy`; combining them is a fatal `rhl-guard` configuration error. |
+
+If none of these flags is present, **`rhl-guard` refuses to dispatch
+`rhl-clear`, `rhl-ps-persistent`, or `rhl-launch-service`** (any
+invocation of those three, not only those that include a path argument)
+and exits with an error pointing the operator at this section. The
+other `rhl-*` helpers do not accept client-chosen paths and continue
+to be dispatched normally.
+
+#### Always-on heuristics
+
+In every mode (including `--permissive-paths`), `rhl-guard` rejects the
+dispatch if any path it extracts from the SSH command is:
+
+- not absolute after `~` expansion;
+- equal to `$HOME`, or an ancestor of `$HOME` (e.g. `/`, `/home`);
+- containing any segment that begins with `.` (e.g. `~/.ssh`,
+  `/tmp/.cache/foo`); or
+- resolved to one of the system-root directories (`/`, `/etc`, `/usr`,
+  `/bin`, `/sbin`, `/lib`, `/lib64`, `/boot`, `/sys`, `/proc`, `/dev`,
+  `/run`, `/var`, `/opt`).
+
+These are guard-side checks applied *before* the helper is `exec`'d.
+They are independent of, and additional to, the helper's own existing
+checks; nothing in the helper changes.
+
 ### Installation
 
-On the remote server, add to `~/.ssh/authorized_keys`:
+On the remote server, add to `~/.ssh/authorized_keys` a `command=` directive
+that includes one of the [path-policy flags](#path-policy). The recommended
+form pins an explicit allowlist file:
 
 ```
-command="rhl-guard" ssh-rsa AAAA... your-key-comment
+command="rhl-guard --data-roots /home/svc/.config/rhl/data-roots" ssh-rsa AAAA... your-key-comment
+```
+
+with `~/.config/rhl/data-roots` containing, e.g.:
+
+```
+# Persistent workdirs mirroring clusters.yaml
+~/seamless-buffers
+~/hashserver-bufferdir
+~/seamless-databasedir
+```
+
+Alternative forms for deployments that prefer markers over a central
+allowlist:
+
+```
+# Seamless preset — no allowlist file needed
+command="rhl-guard --clear-policy seamless" ssh-rsa AAAA... your-key-comment
+
+# Generic marker — drop ".rhl-clearable" into each authorised workdir
+command="rhl-guard --clear-policy marker:.rhl-clearable" ssh-rsa AAAA... your-key-comment
+```
+
+Compatibility form for deployments that cannot configure either of the
+above (not recommended):
+
+```
+command="rhl-guard --permissive-paths" ssh-rsa AAAA... your-key-comment
 ```
 
 Running `rhl-guard` directly prints an installation-oriented error explaining
@@ -225,12 +306,18 @@ Installing `remote-http-launcher` adds a set of server-side helper programs that
 | `rhl-verify-port HOST PORT` | server | TCP-connect to HOST:PORT (3 retries); exit 0 on success, 1 on failure |
 | `rhl-handshake URL` | server | GET URL; exit 0 on 2xx, 1 on network error, 2 on non-2xx status |
 | `rhl-ps [--client]` | client/server | List process state rows; client mode lists local connection state |
-| `rhl-ps-persistent <path>` | server | Report absent, empty, or populated filesystem-backed state |
+| `rhl-ps-persistent <path> [--marker FILENAME]` | server | Report absent, empty, or populated filesystem-backed state; optionally report only directories containing a marker file |
 | `rhl-rm <key> [--client] [--server]` | client/server | Remove launcher JSON state files while leaving logs on disk |
 | `rhl-clear <path>` | server | Remove direct children of a validated persistent directory |
 
-`rhl-clear` and `rhl-ps-persistent` validate that target paths are absolute and
-not system directories before touching anything.
+When dispatched through `rhl-guard`, calls to `rhl-clear`,
+`rhl-ps-persistent`, and `rhl-launch-service` are subject to the path
+policy declared on the guard itself (see [Path policy](#path-policy));
+the guard validates the SSH-supplied paths and refuses to dispatch if
+no policy was declared. The helpers themselves are not modified —
+direct local invocation (e.g. on the server, in tests, or for
+client-side helpers such as `rhl-ps` and `rhl-rm --client`) bypasses
+the guard and behaves exactly as in earlier versions.
 
 All state-file helpers respect the `REMOTE_HTTP_LAUNCHER_DIR` environment variable (same as the launcher).
 
