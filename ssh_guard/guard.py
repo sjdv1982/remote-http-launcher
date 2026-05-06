@@ -137,6 +137,7 @@ import sys
 from dataclasses import dataclass
 
 _HELPER_RE = re.compile(r"rhl-[a-z][a-z-]*\Z")
+_VARSET_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _PATH_HELPERS = {"rhl-clear", "rhl-ps-persistent", "rhl-launch-service"}
 _FORBIDDEN_ROOTS = {
     "/",
@@ -356,6 +357,13 @@ def _parse_and_check(command: str, policy: _PathPolicy | None = None) -> tuple[l
         return None, f"command parse error: {exc}"
     if not parts:
         return None, "empty command"
+    # Strip leading VAR=value assignments so that clients may prepend PATH=...
+    # to cover conda-base installs without breaking the guard whitelist check.
+    # The assignments are dropped — they are not passed to exec.
+    while parts and _VARSET_RE.match(parts[0]):
+        parts = parts[1:]
+    if not parts:
+        return None, "empty command after stripping variable assignments"
     if not _HELPER_RE.fullmatch(parts[0]):
         return None, f"command not in whitelist: {command[:120]!r}"
     policy_error = _check_path_policy(parts, policy)
