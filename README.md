@@ -232,6 +232,21 @@ ssh <remote_host> rhl-cache-conda
 
 Re-run this if the conda installation or environments change. On hosts where no `rhl-*` helpers are installed, the launcher falls back to inline heredoc probes automatically.
 
+### Reaching the `rhl-*` helpers over SSH
+
+The launcher's fallback covers only its own conda discovery — anything that depends directly on the helpers (the `seamless-service-*` layer in `seamless-config`, agents shelling out to `rhl-ps` / `rhl-stop` / `rhl-logs`, etc.) needs the `rhl-*` binaries to actually be on the remote `PATH` for **non-interactive, non-login** SSH sessions. There are three deployment paths:
+
+- **System-wide install** (recommended when you have root): `pip install remote-http-launcher` into the system Python. The helpers land under `/usr/local/bin` and are reachable without any shell setup.
+- **Conda base env install** (no root): install into the conda base environment on the remote host, then **modify `~/.bashrc` so its early "interactive shell" guard does not skip conda activation for non-login SSH sessions**. Typical `~/.bashrc` files contain something like
+  ```bash
+  case $- in
+      *i*) ;;
+        *) return;;
+  esac
+  ```
+  near the top; this short-circuits before the conda hook on non-interactive shells, leaving `rhl-*` off `PATH` when SSH runs `ssh host rhl-ps`. Comment out (or move) those lines so the conda hook is reached for every shell.
+- **Use `rhl-guard`** (no root, no `.bashrc` edit): when SSH is gated by `command="rhl-guard …"` in `authorized_keys`, the guard locates and exec's the helpers itself, so `PATH` setup in the user's shell is irrelevant. This is the cleanest deployment for environments where editing `.bashrc` is not desirable.
+
 ## Lifecycle States
 
 Launcher state normally moves through these states:
