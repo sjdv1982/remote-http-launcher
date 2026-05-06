@@ -122,6 +122,8 @@ The SSH `command=` option in `authorized_keys` forces every incoming SSH session
 
 The guard whitelist covers only top-level `rhl-*` helper commands installed by this package (see below). The helpers perform state inspection, process checks, HTTP handshakes, port verification, conda cache reads, and service launch using structured argv/data instead of remote shell or Python source.
 
+The guard silently strips any leading `VAR=value` shell variable assignments before the whitelist check. This means the standard client PATH prepend (`PATH=$HOME/miniforge3/bin:$HOME/miniconda3/bin:$PATH rhl-ps`) passes through `rhl-guard` unchanged — the assignments are dropped and only the `rhl-*` command and its arguments are exec'd.
+
 Direct process-management commands such as `kill -1 <pid>` are rejected by
 the guard. Use helpers such as `rhl-stop <key>` instead.
 
