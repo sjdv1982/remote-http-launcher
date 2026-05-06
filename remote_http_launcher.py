@@ -43,6 +43,7 @@ CONDA_INIT_BLOCK_RE = re.compile(
 
 FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 DIRNAME_RE = re.compile(r"^[A-Za-z0-9@_./~-]+$")
+SHELL_SAFE_TILDE_PATH_RE = re.compile(r"^~/[A-Za-z0-9@%_+=:,./-]+$")
 
 
 class LauncherError(RuntimeError):
@@ -298,6 +299,12 @@ def _command_snippet(command: str) -> str:
         if len(command) > 65:
             snippet += command[-30:]
     return snippet
+
+
+def quote_remote_shell_path(path: str) -> str:
+    if SHELL_SAFE_TILDE_PATH_RE.fullmatch(path):
+        return path
+    return shlex.quote(path)
 
 
 def _build_expected_phases(cfg: "Configuration") -> list[Phase]:
@@ -950,9 +957,17 @@ class SSHExecutor(Executor):
     ) -> subprocess.CompletedProcess:
         prefix: list[str] = []
         if env:
-            prefix = ["env", *[f"{key}={value}" for key, value in env.items()]]
-        remote_argv = [*prefix, "python3", script_path, *argv]
-        remote_command = shlex.join(remote_argv)
+            prefix = [
+                "env",
+                *[shlex.quote(f"{key}={value}") for key, value in env.items()],
+            ]
+        remote_argv = [
+            *prefix,
+            "python3",
+            quote_remote_shell_path(script_path),
+            *[shlex.quote(arg) for arg in argv],
+        ]
+        remote_command = " ".join(remote_argv)
         snippet = _command_snippet(remote_command)
         self.observer.on_command(self.host, snippet, remote_command)
         result = subprocess.run(
@@ -1702,6 +1717,15 @@ TUNNEL_MONITOR_SCRIPT = textwrap.dedent(
 
 
     def remote_pid_exists(ssh_host, remote_pid):
+        result = subprocess.run(
+            ["ssh", ssh_host, "rhl-pid-alive", str(remote_pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1:
+            return False
         result = subprocess.run(
             ["ssh", ssh_host, "kill", "-0", str(remote_pid)],
             stdout=subprocess.DEVNULL,

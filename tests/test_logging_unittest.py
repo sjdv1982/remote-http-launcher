@@ -257,6 +257,21 @@ class LoggingObserverTests(unittest.TestCase):
         self.assertIn("print('hi')", output)
         self.assertIn("command-done[host]: short", output)
 
+    def test_ssh_uploaded_launch_leaves_safe_tilde_path_expandable(self):
+        observer = RecordingObserver()
+        executor = rhl.SSHExecutor("remote-host", observer)
+        completed = mock.Mock()
+        completed.returncode = 0
+        with mock.patch.object(rhl.subprocess, "run", return_value=completed) as run:
+            executor.invoke_uploaded_launch(
+                "~/.remote-http-launcher/launch_service.py",
+                ["--status-file", "~/.remote-http-launcher/server/svc.json"],
+                env={"RHL_FALLBACK_CONDA_SOURCE": "/home/user/miniforge/etc/conda.sh"},
+            )
+        command = run.call_args.args[0][2]
+        self.assertIn("python3 ~/.remote-http-launcher/launch_service.py", command)
+        self.assertIn("'~/.remote-http-launcher/server/svc.json'", command)
+
     def test_open_log_stream_truncates_existing_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = pathlib.Path(tmpdir) / "launcher.log"
