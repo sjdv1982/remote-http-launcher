@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import subprocess
 import sys
 
@@ -24,17 +25,19 @@ _CONDA_INIT_BLOCK_RE = re.compile(
 )
 
 
-def _find_conda_source() -> str | None:
-    """Return path to conda.sh, or None if conda is already on PATH."""
+def _conda_activate_works(conda_source: str | None) -> bool:
+    prefix = ""
+    if conda_source:
+        prefix = f"source {shlex.quote(conda_source)} && "
     result = subprocess.run(
-        ["bash", "-lc", "command -v conda >/dev/null 2>&1"],
+        ["bash", "-lc", f"{prefix}conda activate base >/dev/null 2>&1"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    if result.returncode == 0:
-        return None  # conda is on PATH
+    return result.returncode == 0
 
-    # Try to find it in ~/.bashrc
+
+def _find_conda_source_in_bashrc() -> str | None:
     bashrc = pathlib.Path("~/.bashrc").expanduser()
     if not bashrc.exists():
         return None
@@ -48,9 +51,37 @@ def _find_conda_source() -> str | None:
     return path_match.group(1)
 
 
+def _find_conda_source_from_base() -> str | None:
+    result = subprocess.run(["conda", "info", "--base"], capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    conda_base = result.stdout.strip()
+    if not conda_base:
+        return None
+    conda_source = pathlib.Path(conda_base) / "etc" / "profile.d" / "conda.sh"
+    if not conda_source.exists():
+        return None
+    return conda_source.as_posix()
+
+
+def _find_conda_source() -> str | None:
+    """Return path to conda.sh, or None if a clean shell can activate conda."""
+    if _conda_activate_works(None):
+        return None
+
+    for find_conda_source in (
+        _find_conda_source_in_bashrc,
+        _find_conda_source_from_base,
+    ):
+        conda_source = find_conda_source()
+        if conda_source and _conda_activate_works(conda_source):
+            return conda_source
+    return None
+
+
 def _run_conda(conda_source: str | None, *args: str) -> subprocess.CompletedProcess:
     if conda_source:
-        cmd = f"source {conda_source} && conda {' '.join(args)}"
+        cmd = f"source {shlex.quote(conda_source)} && conda {shlex.join(args)}"
         return subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True)
     return subprocess.run(["conda", *args], capture_output=True, text=True)
 
@@ -58,16 +89,13 @@ def _run_conda(conda_source: str | None, *args: str) -> subprocess.CompletedProc
 def main() -> None:
     handle_help(sys.argv[1:], "rhl-cache-conda", __doc__ or "")
     conda_source = _find_conda_source()
-    if conda_source is None:
-        # conda is on PATH — verify it's really there
-        check = subprocess.run(
-            ["bash", "-lc", "command -v conda >/dev/null 2>&1"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    if conda_source is None and not _conda_activate_works(None):
+        print(
+            "rhl-cache-conda: conda activate is not initialized and no usable "
+            "conda.sh was found",
+            file=sys.stderr,
         )
-        if check.returncode != 0:
-            print("rhl-cache-conda: conda not found on PATH and no conda.sh in ~/.bashrc",
-                  file=sys.stderr)
-            sys.exit(1)
+        sys.exit(1)
 
     base_result = _run_conda(conda_source, "info", "--base")
     if base_result.returncode != 0:

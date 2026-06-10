@@ -12,11 +12,16 @@ test key from `~/.ssh/id_test`, and the matching public key in
 command="/home/agent/miniforge3/envs/seamless1/bin/rhl-guard" <contents of ~/.ssh/id_test.pub>
 ```
 
-Prime the guarded conda cache before running Seamless tests:
+You can prime the guarded conda cache before running Seamless tests:
 
 ```bash
 ssh localhost_guard rhl-cache-conda
 ```
+
+The launcher also refreshes this cache automatically when a requested conda
+environment is missing from the cached environment list. That refresh is
+dispatched as the guarded `rhl-cache-conda` helper, so debug logs show it
+as a normal helper command.
 
 The local `seamless.profile.yaml` included here records the required profile
 selection for this integration setup.
