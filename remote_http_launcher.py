@@ -1919,10 +1919,46 @@ def _fetch_conda_base(executor: Executor) -> Optional[str]:
     return base_path
 
 
+def _conda_env_in_cache(executor: Executor, env: str) -> bool:
+    envs = executor._conda_cache.get("envs", [])
+    return any(path.endswith(f"{os.sep}{env}") for path in envs)
+
+
+def _refresh_conda_cache(executor: Executor) -> bool:
+    executor.observer.on_detail(f"{executor.host} refreshing conda cache")
+    helper_result = executor._try_helper(["rhl-cache-conda"])
+    if helper_result is None:
+        result = executor.run_shell("rhl-cache-conda", check=False, conda=False)
+        if result.returncode != 0:
+            return False
+    elif helper_result.returncode != 0:
+        stderr = helper_result.stderr.strip()
+        if stderr:
+            executor.observer.on_detail(
+                f"{executor.host} rhl-cache-conda failed: {stderr}"
+            )
+        return False
+
+    cache = executor._read_conda_cache()
+    if cache is None:
+        return False
+    executor._conda_cache = cache
+    executor._conda_source = cache.get("conda_source")
+    executor._conda_checked = True
+    return True
+
+
 def _conda_env_exists(executor: Executor, env: str) -> bool:
     if executor._conda_cache is not None:
-        envs = executor._conda_cache.get("envs", [])
-        return any(path.endswith(f"{os.sep}{env}") for path in envs)
+        if _conda_env_in_cache(executor, env):
+            return True
+        executor.observer.on_detail(
+            f"{executor.host} conda environment '{env}' missing from cache; "
+            "running rhl-cache-conda"
+        )
+        if _refresh_conda_cache(executor):
+            return _conda_env_in_cache(executor, env)
+        return False
     result = executor.run_shell("conda env list --json", check=True, conda=True)
     try:
         payload = json.loads(result.stdout)
@@ -1930,6 +1966,22 @@ def _conda_env_exists(executor: Executor, env: str) -> bool:
         raise LauncherError("Failed to parse output from conda env list.") from exc
     envs = payload.get("envs", [])
     return any(path.endswith(f"{os.sep}{env}") for path in envs)
+
+
+def _conda_unavailable_message(executor: Executor) -> str:
+    return (
+        "Conda environment requested but conda is not available on "
+        f"{executor.host}."
+    )
+
+
+def _conda_env_missing_message(executor: Executor, env: str) -> str:
+    if executor._conda_cache is not None:
+        return (
+            f"Conda environment '{env}' is not listed in the conda cache for "
+            f"{executor.host} after running rhl-cache-conda."
+        )
+    return f"Conda environment '{env}' does not exist on {executor.host}."
 
 
 def _remote_handshake_port(cfg: Configuration, data: Dict[str, Any]) -> int:
@@ -2037,12 +2089,10 @@ def handle_remote(
             remote.observer.on_detail("discover remote conda base and environment")
             conda_base = _fetch_conda_base(remote.executor)
             if not conda_base:
-                raise LauncherError(
-                    "Conda environment requested but conda is not installed remotely."
-                )
+                raise LauncherError(_conda_unavailable_message(remote.executor))
             if not _conda_env_exists(remote.executor, cfg.conda_env):
                 raise LauncherError(
-                    f"Remote conda environment '{cfg.conda_env}' does not exist."
+                    _conda_env_missing_message(remote.executor, cfg.conda_env)
                 )
             remote.observer.on_phase(Phase.CONDA_SETUP, "ok")
         if dry_run:
