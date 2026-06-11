@@ -378,6 +378,67 @@ class LauncherFlowTests(unittest.TestCase):
             ],
         )
 
+    def test_handle_remote_repairs_stale_conda_source_cache_after_launch_failure(self):
+        observer = RecordingObserver()
+        cfg = make_cfg(conda="seamless")
+        starting = {"status": "starting", "pid": 321}
+        running = {
+            "status": "running",
+            "pid": 789,
+            "port": 9100,
+            "uid": 1000,
+            "command": "echo hello",
+        }
+        remote = FakeRemote(observer, [False, True, False, True], [starting, running])
+        remote.logged = f"\n{rhl.CONDA_ACTIVATE_NOT_INITIALIZED}\n"
+        launch_count = 0
+
+        class Executor:
+            host = "LocalExecutor"
+
+            def __init__(self):
+                self.observer = observer
+                self._conda_cache = {
+                    "conda_base": "/home/agent/miniforge3",
+                    "conda_source": None,
+                    "envs": ["/home/agent/miniforge3/envs/seamless"],
+                }
+                self._conda_source = None
+                self._conda_checked = True
+                self.helper_calls = []
+
+            def _try_helper(self, argv):
+                self.helper_calls.append(argv)
+                return mock.Mock(returncode=0, stderr="")
+
+            def _read_conda_cache(self):
+                return {
+                    "conda_base": "/home/agent/miniforge3",
+                    "conda_source": "/home/agent/miniforge3/etc/profile.d/conda.sh",
+                    "envs": ["/home/agent/miniforge3/envs/seamless"],
+                }
+
+        executor = Executor()
+        remote.executor = executor
+
+        def launch_process(_conda_base):
+            nonlocal launch_count
+            launch_count += 1
+
+        remote.launch_process = launch_process
+
+        with mock.patch.object(rhl, "monitor_remote_start", return_value=None):
+            result, kind = rhl.handle_remote(cfg, remote)
+
+        self.assertEqual(result, running)
+        self.assertEqual(kind, "launched")
+        self.assertEqual(launch_count, 2)
+        self.assertIn(["rhl-cache-conda"], executor.helper_calls)
+        self.assertEqual(
+            executor._conda_cache["conda_source"],
+            "/home/agent/miniforge3/etc/profile.d/conda.sh",
+        )
+
     def test_handle_remote_stale_state_cleans_and_launches_same_invocation(self):
         observer = RecordingObserver()
         cfg = make_cfg()

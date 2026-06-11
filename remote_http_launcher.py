@@ -44,6 +44,7 @@ CONDA_INIT_BLOCK_RE = re.compile(
 FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 DIRNAME_RE = re.compile(r"^[A-Za-z0-9@_./~-]+$")
 SHELL_SAFE_TILDE_PATH_RE = re.compile(r"^~/[A-Za-z0-9@%_+=:,./-]+$")
+CONDA_ACTIVATE_NOT_INITIALIZED = "CondaError: Run 'conda init' before 'conda activate'"
 
 
 class LauncherError(RuntimeError):
@@ -1984,6 +1985,25 @@ def _conda_env_missing_message(executor: Executor, env: str) -> str:
     return f"Conda environment '{env}' does not exist on {executor.host}."
 
 
+def _repair_conda_cache_after_activation_error(
+    executor: Executor, log: str | None
+) -> bool:
+    if log is None or CONDA_ACTIVATE_NOT_INITIALIZED not in log:
+        return False
+    if executor._conda_cache is None:
+        return False
+    if executor._conda_cache.get("conda_source"):
+        return False
+
+    executor.observer.on_detail(
+        f"{executor.host} detected stale conda cache with conda_source=null; "
+        "running rhl-cache-conda"
+    )
+    if not _refresh_conda_cache(executor):
+        return False
+    return bool(executor._conda_cache.get("conda_source"))
+
+
 def _remote_handshake_port(cfg: Configuration, data: Dict[str, Any]) -> int:
     if cfg.handshake is None:
         return int(data["port"])
@@ -2052,6 +2072,7 @@ def handle_remote(
     cfg: Configuration, remote: RemoteState, *, dry_run: bool = False
 ) -> Tuple[Dict[str, Any], str]:
     attempted_launch = False
+    repaired_conda_activation = False
     while True:
         if remote.exists():
             data = remote.read()
@@ -2074,6 +2095,19 @@ def handle_remote(
                     remote,
                     result="remove+log" if log is not None else "remove",
                 )
+                if (
+                    not repaired_conda_activation
+                    and cfg.conda_env
+                    and _repair_conda_cache_after_activation_error(
+                        remote.executor, log
+                    )
+                ):
+                    repaired_conda_activation = True
+                    attempted_launch = False
+                    remote.observer.on_detail(
+                        "retrying launch after refreshing conda cache"
+                    )
+                    continue
                 if attempted_launch:
                     raise LauncherError(
                         "Remote process did not finish starting after relaunch."
@@ -2104,6 +2138,7 @@ def handle_remote(
         remote.launch_process(conda_base)
         attempted_launch = True
         remote.observer.on_phase(Phase.WAIT_FOR_START, "waiting")
+        retry_launch_after_repair = False
         for poll in range(10):
             remote.observer.on_detail(f"wait_for_start exists poll {poll + 1}/10")
             if remote.exists():
@@ -2121,6 +2156,20 @@ def handle_remote(
                         remote,
                         result="remove+log" if log is not None else "remove",
                     )
+                    if (
+                        not repaired_conda_activation
+                        and cfg.conda_env
+                        and _repair_conda_cache_after_activation_error(
+                            remote.executor, log
+                        )
+                    ):
+                        repaired_conda_activation = True
+                        attempted_launch = False
+                        remote.observer.on_detail(
+                            "retrying launch after refreshing conda cache"
+                        )
+                        retry_launch_after_repair = True
+                        break
                     raise LauncherError(
                         "Remote process did not finish starting after relaunch."
                     )
@@ -2137,6 +2186,8 @@ def handle_remote(
                 _cleanup_remote_state(remote, result="remove")
                 raise LauncherError("Remote launch already attempted and failed.")
             time.sleep(2.0)
+        if retry_launch_after_repair:
+            continue
         raise LauncherError("Remote launch already attempted and failed.")
 
 
