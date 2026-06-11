@@ -3,8 +3,10 @@ import subprocess
 from types import SimpleNamespace
 
 from remote_http_launcher import (
+    CONDA_ACTIVATE_NOT_INITIALIZED,
     _conda_env_missing_message,
     _conda_env_exists,
+    _repair_conda_cache_after_activation_error,
     _conda_unavailable_message,
 )
 
@@ -59,6 +61,43 @@ def test_conda_env_exists_returns_false_when_refresh_still_misses():
 
     assert _conda_env_exists(executor, "seamless") is False
     assert ["rhl-cache-conda"] in executor.helper_calls
+
+
+def test_repair_conda_cache_after_activation_error_refreshes_null_source():
+    executor = _Executor(
+        {
+            "envs": ["/home/agent/miniforge3/envs/seamless"],
+            "conda_source": "/home/agent/miniforge3/etc/profile.d/conda.sh",
+        }
+    )
+    executor._conda_cache = {
+        "envs": ["/home/agent/miniforge3/envs/seamless"],
+        "conda_source": None,
+    }
+
+    assert (
+        _repair_conda_cache_after_activation_error(
+            executor, f"\n{CONDA_ACTIVATE_NOT_INITIALIZED}\n"
+        )
+        is True
+    )
+    assert ["rhl-cache-conda"] in executor.helper_calls
+    assert (
+        executor._conda_cache["conda_source"]
+        == "/home/agent/miniforge3/etc/profile.d/conda.sh"
+    )
+
+
+def test_repair_conda_cache_after_activation_error_ignores_other_logs():
+    executor = _Executor(
+        {
+            "envs": ["/home/agent/miniforge3/envs/seamless"],
+            "conda_source": "/home/agent/miniforge3/etc/profile.d/conda.sh",
+        }
+    )
+
+    assert _repair_conda_cache_after_activation_error(executor, "different error") is False
+    assert executor.helper_calls == []
 
 
 def test_conda_cache_refresh_is_recorded_as_helper_command(monkeypatch):

@@ -19,9 +19,11 @@ ssh localhost_guard rhl-cache-conda
 ```
 
 The launcher also refreshes this cache automatically when a requested conda
-environment is missing from the cached environment list. That refresh is
-dispatched as the guarded `rhl-cache-conda` helper, so debug logs show it
-as a normal helper command.
+environment is missing from the cached environment list, or when a stale cache
+with `conda_source: null` causes service startup to fail with
+`CondaError: Run 'conda init' before 'conda activate'`. That refresh is
+dispatched as the guarded `rhl-cache-conda` helper, so debug logs show it as a
+normal helper command.
 
 The local `seamless.profile.yaml` included here records the required profile
 selection for this integration setup.
