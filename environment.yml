@@ -4,3 +4,6 @@ channels:
 dependencies:
   - pyyaml
   - jsonschema
+  - pip
+  - pip:
+      - -e .
